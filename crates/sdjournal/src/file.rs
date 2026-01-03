@@ -54,10 +54,10 @@ fn parse_entry_data_offsets_bytes(
 ) -> Result<Vec<u64>> {
     let mut data_offsets = Vec::new();
     if compact {
-        // In compact format, each ENTRY item is 8 bytes:
+        // In compact format, each ENTRY item is 4 bytes:
         // - object_offset: u32
-        // - hash: u32
-        if !items_bytes.len().is_multiple_of(8) {
+        // (the per-item hash is not stored in compact mode)
+        if !items_bytes.len().is_multiple_of(4) {
             return Err(SdJournalError::Corrupt {
                 path: Some(path.to_path_buf()),
                 offset: Some(entry_offset),
@@ -67,7 +67,7 @@ fn parse_entry_data_offsets_bytes(
         crate::util::ensure_limit_usize(
             LimitKind::FieldsPerEntry,
             max_fields_per_entry,
-            items_bytes.len() / 8,
+            items_bytes.len() / 4,
         )?;
 
         let mut i = 0;
@@ -81,7 +81,7 @@ fn parse_entry_data_offsets_bytes(
                 break;
             }
             data_offsets.push(u64::from(off));
-            i += 8;
+            i += 4;
         }
     } else {
         // In regular format, each ENTRY item is 16 bytes:
@@ -1274,17 +1274,12 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn compact_entry_items_skip_hashes() {
+    fn compact_entry_items_offsets_only() {
         let mut items = Vec::new();
 
         items.extend_from_slice(&100u32.to_le_bytes());
-        items.extend_from_slice(&0xdead_beefu32.to_le_bytes());
-
         items.extend_from_slice(&200u32.to_le_bytes());
         items.extend_from_slice(&0u32.to_le_bytes());
-
-        items.extend_from_slice(&0u32.to_le_bytes());
-        items.extend_from_slice(&0xabad_1deau32.to_le_bytes());
 
         let got = parse_entry_data_offsets_bytes(&items, true, 1024, Path::new("dummy"), 0)
             .expect("parse compact entry items");
