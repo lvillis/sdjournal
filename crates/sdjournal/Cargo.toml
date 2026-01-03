@@ -7,6 +7,7 @@ homepage = "https://github.com/lvillis/sdjournal"
 repository = "https://github.com/lvillis/sdjournal"
 keywords = ["systemd", "journal", "journald", "logging", "linux"]
 categories = ["os::unix-apis", "parsing", "filesystem"]
+readme.workspace = true
 license.workspace = true
 edition.workspace = true
 rust-version.workspace = true

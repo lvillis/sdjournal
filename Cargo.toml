@@ -9,6 +9,7 @@ resolver = "3"
 edition = "2024"
 rust-version = "1.92.0"
 license = "MIT"
+readme = "README.md"
 
 [workspace.dependencies]
 hmac = { version = "0.12.1", default-features = false, features = ["std"] }
