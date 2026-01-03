@@ -27,9 +27,12 @@ siphasher = { version = "1.0.1", default-features = false, features = ["std"] }
 xz2 = { version = "0.1.7", default-features = false, features = ["static"] }
 
 [workspace.metadata.release]
+allow-branch = ["main"]
+consolidate-commits = true
+enable-all-features = true
 shared-version = true
 tag-prefix = ""
-tag-name = "{{prefix}}{{version}}"
-tag-message = "chore: release version {{version}}"
-pre-release-commit-message = "chore: release version {{version}}"
-pre-release-hook = ["git", "cliff", "--workdir", "../", "--output", "../CHANGELOG.md", "--tag", "{{version}}"]
+tag-name = "{{version}}"
+tag-message = "chore(release): {{version}}"
+pre-release-commit-message = "chore(release): {{version}}"
+pre-release-hook = ["git", "cliff", "--workdir", "../../", "--output", "../../CHANGELOG.md", "--tag", "{{version}}"]
