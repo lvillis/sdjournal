@@ -1,3 +1,8 @@
+## [0.1.4] - 2026-01-03
+
+### ⚙️ Miscellaneous Tasks
+
+- Update Cargo.toml
 ## [0.1.3] - 2026-01-03
 
 ### 🐛 Bug Fixes
@@ -7,6 +12,10 @@
 - Ci
 - Warn
 - Parse compact ENTRY items correctly
+
+### ⚙️ Miscellaneous Tasks
+
+- *(release)* 0.1.3
 ## [0.1.2] - 2026-01-03
 
 ### ⚙️ Miscellaneous Tasks
