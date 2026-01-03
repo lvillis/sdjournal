@@ -20,5 +20,7 @@ jobs:
         run: cargo install cargo-fuzz --locked
 
       - name: Run fuzz targets (short)
+        env:
+          RUSTUP_TOOLCHAIN: nightly
         run: |
           cargo fuzz run journal_open -- -max_total_time=60

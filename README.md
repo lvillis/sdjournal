@@ -59,4 +59,4 @@ cargo run -p sdjournal --example checkpoint_follow -- sshd.service /var/tmp/sdjo
 - Format: `cargo fmt`
 - Lint: `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - Test: `cargo test --workspace --all-features`
-- Fuzz (nightly): `cargo fuzz run journal_open`
+- Fuzz (nightly): `cargo +nightly fuzz run journal_open`
