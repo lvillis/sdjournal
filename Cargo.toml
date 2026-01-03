@@ -2,6 +2,7 @@
 members = [
   "crates/sdjournal",
 ]
+exclude = ["fuzz"]
 resolver = "3"
 
 [workspace.package]
