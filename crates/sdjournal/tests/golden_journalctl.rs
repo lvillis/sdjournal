@@ -9,6 +9,10 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+type NormalizedFields = BTreeMap<String, String>;
+type BaselineRow = (u64, u64, String, String, NormalizedFields);
+type GotRow = (u64, u64, String, NormalizedFields);
+
 fn cmd_output(cmd: &str, args: &[&str]) -> std::io::Result<Output> {
     Command::new(cmd).args(args).output()
 }
@@ -240,8 +244,7 @@ fn golden_match_and_time_filters_against_journalctl() {
     };
 
     let unique_s = unique.to_string();
-    let mut baseline_filtered: Vec<(u64, u64, String, String, BTreeMap<String, String>)> =
-        Vec::new();
+    let mut baseline_filtered: Vec<BaselineRow> = Vec::new();
     for v in &baseline {
         let Some(ts) = get_realtime_usec(v) else {
             continue;
@@ -293,7 +296,7 @@ fn golden_match_and_time_filters_against_journalctl() {
         }
     };
 
-    let mut got_filtered: Vec<(u64, u64, String, BTreeMap<String, String>)> = Vec::new();
+    let mut got_filtered: Vec<GotRow> = Vec::new();
     for e in got {
         let msg = e
             .get("MESSAGE")
