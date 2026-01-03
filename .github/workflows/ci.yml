@@ -44,4 +44,3 @@ jobs:
             SDJOURNAL_TEST_USE_SUDO="$SDJOURNAL_TEST_USE_SUDO" \
             CARGO_TARGET_DIR="/tmp/sdjournal-target" \
             cargo test --workspace --all-features
-

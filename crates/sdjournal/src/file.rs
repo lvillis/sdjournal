@@ -45,6 +45,80 @@ const OBJECT_COMPRESSED_XZ: u8 = 1 << 0;
 const OBJECT_COMPRESSED_LZ4: u8 = 1 << 1;
 const OBJECT_COMPRESSED_ZSTD: u8 = 1 << 2;
 
+fn parse_entry_data_offsets_bytes(
+    items_bytes: &[u8],
+    compact: bool,
+    max_fields_per_entry: usize,
+    path: &Path,
+    entry_offset: u64,
+) -> Result<Vec<u64>> {
+    let mut data_offsets = Vec::new();
+    if compact {
+        // In compact format, each ENTRY item is 8 bytes:
+        // - object_offset: u32
+        // - hash: u32
+        if !items_bytes.len().is_multiple_of(8) {
+            return Err(SdJournalError::Corrupt {
+                path: Some(path.to_path_buf()),
+                offset: Some(entry_offset),
+                reason: "ENTRY compact items not aligned".to_string(),
+            });
+        }
+        crate::util::ensure_limit_usize(
+            LimitKind::FieldsPerEntry,
+            max_fields_per_entry,
+            items_bytes.len() / 8,
+        )?;
+
+        let mut i = 0;
+        while i < items_bytes.len() {
+            let off = read_u32_le(items_bytes, i).ok_or_else(|| SdJournalError::Corrupt {
+                path: Some(path.to_path_buf()),
+                offset: Some(entry_offset),
+                reason: "ENTRY compact item truncated".to_string(),
+            })?;
+            if off == 0 {
+                break;
+            }
+            data_offsets.push(u64::from(off));
+            i += 8;
+        }
+    } else {
+        // In regular format, each ENTRY item is 16 bytes:
+        // - object_offset: u64
+        // - hash: u64
+        if !items_bytes.len().is_multiple_of(16) {
+            return Err(SdJournalError::Corrupt {
+                path: Some(path.to_path_buf()),
+                offset: Some(entry_offset),
+                reason: "ENTRY regular items not aligned".to_string(),
+            });
+        }
+        crate::util::ensure_limit_usize(
+            LimitKind::FieldsPerEntry,
+            max_fields_per_entry,
+            items_bytes.len() / 16,
+        )?;
+
+        let mut i = 0;
+        while i < items_bytes.len() {
+            let object_offset =
+                read_u64_le(items_bytes, i).ok_or_else(|| SdJournalError::Corrupt {
+                    path: Some(path.to_path_buf()),
+                    offset: Some(entry_offset),
+                    reason: "ENTRY item truncated".to_string(),
+                })?;
+            if object_offset == 0 {
+                break;
+            }
+            data_offsets.push(object_offset);
+            i += 16;
+        }
+    }
+
+    Ok(data_offsets)
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub(crate) struct Header {
@@ -545,63 +619,13 @@ impl JournalFile {
                 reason: "missing entry items".to_string(),
             })?;
 
-        let mut data_offsets = Vec::new();
-        if self.inner.header.is_compact() {
-            if items_bytes.len() % 4 != 0 {
-                return Err(SdJournalError::Corrupt {
-                    path: Some(self.inner.path.clone()),
-                    offset: Some(entry_offset),
-                    reason: "ENTRY compact items not aligned".to_string(),
-                });
-            }
-            crate::util::ensure_limit_usize(
-                LimitKind::FieldsPerEntry,
-                self.inner.config.max_fields_per_entry,
-                items_bytes.len() / 4,
-            )?;
-
-            let mut i = 0;
-            while i < items_bytes.len() {
-                let off = read_u32_le(items_bytes, i).ok_or_else(|| SdJournalError::Corrupt {
-                    path: Some(self.inner.path.clone()),
-                    offset: Some(entry_offset),
-                    reason: "ENTRY compact item truncated".to_string(),
-                })?;
-                if off == 0 {
-                    break;
-                }
-                data_offsets.push(u64::from(off));
-                i += 4;
-            }
-        } else {
-            if items_bytes.len() % 16 != 0 {
-                return Err(SdJournalError::Corrupt {
-                    path: Some(self.inner.path.clone()),
-                    offset: Some(entry_offset),
-                    reason: "ENTRY regular items not aligned".to_string(),
-                });
-            }
-            crate::util::ensure_limit_usize(
-                LimitKind::FieldsPerEntry,
-                self.inner.config.max_fields_per_entry,
-                items_bytes.len() / 16,
-            )?;
-
-            let mut i = 0;
-            while i < items_bytes.len() {
-                let object_offset =
-                    read_u64_le(items_bytes, i).ok_or_else(|| SdJournalError::Corrupt {
-                        path: Some(self.inner.path.clone()),
-                        offset: Some(entry_offset),
-                        reason: "ENTRY item truncated".to_string(),
-                    })?;
-                if object_offset == 0 {
-                    break;
-                }
-                data_offsets.push(object_offset);
-                i += 16;
-            }
-        }
+        let data_offsets = parse_entry_data_offsets_bytes(
+            items_bytes,
+            self.inner.header.is_compact(),
+            self.inner.config.max_fields_per_entry,
+            self.path(),
+            entry_offset,
+        )?;
 
         let mut fields_in_order: Vec<(String, Vec<u8>)> = Vec::new();
         for data_offset in data_offsets {
@@ -691,63 +715,13 @@ impl JournalFile {
                 reason: "missing entry items".to_string(),
             })?;
 
-        let mut data_offsets = Vec::new();
-        if self.inner.header.is_compact() {
-            if items_bytes.len() % 4 != 0 {
-                return Err(SdJournalError::Corrupt {
-                    path: Some(self.inner.path.clone()),
-                    offset: Some(entry_offset),
-                    reason: "ENTRY compact items not aligned".to_string(),
-                });
-            }
-            crate::util::ensure_limit_usize(
-                LimitKind::FieldsPerEntry,
-                self.inner.config.max_fields_per_entry,
-                items_bytes.len() / 4,
-            )?;
-
-            let mut i = 0;
-            while i < items_bytes.len() {
-                let off = read_u32_le(items_bytes, i).ok_or_else(|| SdJournalError::Corrupt {
-                    path: Some(self.inner.path.clone()),
-                    offset: Some(entry_offset),
-                    reason: "ENTRY compact item truncated".to_string(),
-                })?;
-                if off == 0 {
-                    break;
-                }
-                data_offsets.push(u64::from(off));
-                i += 4;
-            }
-        } else {
-            if items_bytes.len() % 16 != 0 {
-                return Err(SdJournalError::Corrupt {
-                    path: Some(self.inner.path.clone()),
-                    offset: Some(entry_offset),
-                    reason: "ENTRY regular items not aligned".to_string(),
-                });
-            }
-            crate::util::ensure_limit_usize(
-                LimitKind::FieldsPerEntry,
-                self.inner.config.max_fields_per_entry,
-                items_bytes.len() / 16,
-            )?;
-
-            let mut i = 0;
-            while i < items_bytes.len() {
-                let object_offset =
-                    read_u64_le(items_bytes, i).ok_or_else(|| SdJournalError::Corrupt {
-                        path: Some(self.inner.path.clone()),
-                        offset: Some(entry_offset),
-                        reason: "ENTRY item truncated".to_string(),
-                    })?;
-                if object_offset == 0 {
-                    break;
-                }
-                data_offsets.push(object_offset);
-                i += 16;
-            }
-        }
+        let data_offsets = parse_entry_data_offsets_bytes(
+            items_bytes,
+            self.inner.header.is_compact(),
+            self.inner.config.max_fields_per_entry,
+            self.path(),
+            entry_offset,
+        )?;
 
         let mut fields_in_order = Vec::new();
         for data_offset in data_offsets {
@@ -878,11 +852,16 @@ impl JournalFile {
                 reason: format!("expected DATA object, found type {}", oh.object_type),
             });
         }
-        if oh.size < 64 {
+        let min_size = if self.inner.header.is_compact() {
+            72
+        } else {
+            64
+        };
+        if oh.size < min_size {
             return Err(SdJournalError::Corrupt {
                 path: Some(self.inner.path.clone()),
                 offset: Some(data_offset),
-                reason: format!("DATA object too small: {}", oh.size),
+                reason: format!("DATA object too small: {} (min {})", oh.size, min_size),
             });
         }
 
@@ -1287,6 +1266,45 @@ pub(crate) struct DataEntryOffsetIter {
     current_items: VecDeque<u64>,
     arrays_exhausted: bool,
     exhausted: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_entry_data_offsets_bytes;
+    use std::path::Path;
+
+    #[test]
+    fn compact_entry_items_skip_hashes() {
+        let mut items = Vec::new();
+
+        items.extend_from_slice(&100u32.to_le_bytes());
+        items.extend_from_slice(&0xdead_beefu32.to_le_bytes());
+
+        items.extend_from_slice(&200u32.to_le_bytes());
+        items.extend_from_slice(&0u32.to_le_bytes());
+
+        items.extend_from_slice(&0u32.to_le_bytes());
+        items.extend_from_slice(&0xabad_1deau32.to_le_bytes());
+
+        let got = parse_entry_data_offsets_bytes(&items, true, 1024, Path::new("dummy"), 0)
+            .expect("parse compact entry items");
+        assert_eq!(got, vec![100, 200]);
+    }
+
+    #[test]
+    fn regular_entry_items_skip_hashes() {
+        let mut items = Vec::new();
+
+        items.extend_from_slice(&0x1111_2222_3333_4444u64.to_le_bytes());
+        items.extend_from_slice(&0u64.to_le_bytes());
+
+        items.extend_from_slice(&0u64.to_le_bytes());
+        items.extend_from_slice(&0xffff_eeee_dddd_ccccu64.to_le_bytes());
+
+        let got = parse_entry_data_offsets_bytes(&items, false, 1024, Path::new("dummy"), 0)
+            .expect("parse regular entry items");
+        assert_eq!(got, vec![0x1111_2222_3333_4444]);
+    }
 }
 
 impl DataEntryOffsetIter {
