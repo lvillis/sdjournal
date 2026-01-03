@@ -1,6 +1,6 @@
 [package]
 name = "sdjournal"
-version = "0.1.4"
+version = "0.1.5"
 description = "Pure Rust systemd journal reader and query engine"
 documentation = "https://docs.rs/sdjournal"
 homepage = "https://github.com/lvillis/sdjournal"
