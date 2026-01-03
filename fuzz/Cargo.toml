@@ -1,0 +1,17 @@
+[package]
+name = "sdjournal-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sdjournal = { path = "../crates/sdjournal" }
+tempfile = "3"
+
+[[bin]]
+name = "journal_open"
+path = "fuzz_targets/journal_open.rs"
+test = false
+doc = false
+

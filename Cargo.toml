@@ -1,0 +1,35 @@
+[workspace]
+members = [
+  "crates/sdjournal",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.92.0"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+hmac = { version = "0.12.1", default-features = false, features = ["std"] }
+inotify = { version = "0.11.0", default-features = false }
+libc = { version = "0.2.178", default-features = false }
+lz4_flex = { version = "0.12.0", default-features = false, features = ["std", "safe-decode", "checked-decode"] }
+memmap2 = { version = "0.9.9", default-features = false }
+num-bigint = { version = "0.4.6", default-features = false, features = ["std"] }
+num-traits = { version = "0.2.19", default-features = false, features = ["std"] }
+serde = { version = "1.0.228", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1.0.148", default-features = false, features = ["std"] }
+sha2 = { version = "0.10.9", default-features = false, features = ["std"] }
+tokio = { version = "1.48.0", default-features = false, features = ["sync"] }
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+ruzstd = { version = "0.8.2", default-features = false, features = ["std"] }
+siphasher = { version = "1.0.1", default-features = false, features = ["std"] }
+xz2 = { version = "0.1.7", default-features = false, features = ["static"] }
+
+[workspace.metadata.release]
+shared-version = true
+tag-prefix = ""
+tag-name = "{{prefix}}{{version}}"
+tag-message = "chore: release version {{version}}"
+pre-release-commit-message = "chore: release version {{version}}"
+pre-release-hook = ["git", "cliff", "--workdir", "../", "--output", "../CHANGELOG.md", "--tag", "{{version}}"]
