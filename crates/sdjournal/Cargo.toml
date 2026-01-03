@@ -2,6 +2,11 @@
 name = "sdjournal"
 version = "0.1.3"
 description = "Pure Rust systemd journal reader and query engine"
+documentation = "https://docs.rs/sdjournal"
+homepage = "https://github.com/lvillis/sdjournal"
+repository = "https://github.com/lvillis/sdjournal"
+keywords = ["systemd", "journal", "journald", "logging", "linux"]
+categories = ["os::unix-apis", "parsing", "filesystem"]
 license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
