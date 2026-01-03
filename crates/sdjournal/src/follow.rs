@@ -34,7 +34,7 @@ impl InotifyWatcher {
     fn new(watch_paths: &[PathBuf]) -> Option<Self> {
         use inotify::WatchMask;
 
-        let mut inotify = match inotify::Inotify::init() {
+        let inotify = match inotify::Inotify::init() {
             Ok(v) => v,
             Err(_) => return None,
         };
