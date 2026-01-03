@@ -1,5 +1,4 @@
 use crate::cursor::Cursor;
-use crate::entry::EntryOwned;
 use crate::entry::EntryRef;
 use crate::error::{Result, SdJournalError};
 use crate::journal::Journal;
@@ -7,6 +6,9 @@ use crate::query::JournalQuery;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
+
+#[cfg(feature = "tokio")]
+use crate::entry::EntryOwned;
 
 #[cfg(feature = "tracing")]
 use tracing::warn;

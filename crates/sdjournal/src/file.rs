@@ -22,7 +22,9 @@ const HEADER_INCOMPATIBLE_KEYED_HASH: u32 = 1 << 2;
 const HEADER_INCOMPATIBLE_COMPRESSED_ZSTD: u32 = 1 << 3;
 const HEADER_INCOMPATIBLE_COMPACT: u32 = 1 << 4;
 
+#[cfg(any(feature = "tracing", feature = "verify-seal"))]
 const HEADER_COMPATIBLE_SEALED: u32 = 1 << 0;
+#[cfg(any(feature = "tracing", feature = "verify-seal"))]
 const HEADER_COMPATIBLE_SEALED_CONTINUOUS: u32 = 1 << 2;
 
 const KNOWN_INCOMPATIBLE_FLAGS: u32 = HEADER_INCOMPATIBLE_COMPRESSED_XZ
@@ -208,10 +210,12 @@ impl Header {
         self.incompatible_flags & HEADER_INCOMPATIBLE_KEYED_HASH != 0
     }
 
+    #[cfg(any(feature = "tracing", feature = "verify-seal"))]
     pub(crate) fn is_sealed(&self) -> bool {
         self.compatible_flags & HEADER_COMPATIBLE_SEALED != 0
     }
 
+    #[cfg(any(feature = "tracing", feature = "verify-seal"))]
     pub(crate) fn is_sealed_continuous(&self) -> bool {
         self.compatible_flags & HEADER_COMPATIBLE_SEALED_CONTINUOUS != 0
     }
@@ -374,14 +378,17 @@ impl JournalFile {
         self.inner.header.seqnum_id
     }
 
+    #[cfg(feature = "verify-seal")]
     pub(crate) fn header(&self) -> &Header {
         &self.inner.header
     }
 
+    #[cfg(feature = "verify-seal")]
     pub(crate) fn used_size(&self) -> u64 {
         self.inner.used_size
     }
 
+    #[cfg(feature = "verify-seal")]
     pub(crate) fn config(&self) -> &JournalConfig {
         &self.inner.config
     }
