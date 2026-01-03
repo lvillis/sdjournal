@@ -51,7 +51,7 @@ impl InotifyWatcher {
 
         let mut added = 0usize;
         for p in watch_paths {
-            if inotify.add_watch(p, mask).is_ok() {
+            if inotify.watches().add(p, mask).is_ok() {
                 added = added.saturating_add(1);
             }
         }
