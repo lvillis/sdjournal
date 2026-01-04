@@ -1,11 +1,13 @@
 use crate::error::{Result, SdJournalError};
 use crate::util::checked_add_u64;
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[cfg(feature = "mmap")]
 use memmap2::Mmap;
+#[cfg(feature = "mmap")]
+use std::path::Path;
 
 /// A byte buffer returned by `RandomAccess`.
 ///

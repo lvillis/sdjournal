@@ -1,5 +1,9 @@
 use crate::error::{LimitKind, Result, SdJournalError};
-use crate::file::{JournalFile, ObjectHeader};
+use crate::file::JournalFile;
+use crate::format::{
+    OBJECT_DATA, OBJECT_DATA_HASH_TABLE, OBJECT_ENTRY, OBJECT_ENTRY_ARRAY, OBJECT_FIELD,
+    OBJECT_FIELD_HASH_TABLE, OBJECT_TAG, ObjectHeader,
+};
 use crate::util::{checked_add_u64, read_u64_le};
 use hmac::{Hmac, Mac as _};
 use num_bigint::{BigInt, BigUint};
@@ -17,14 +21,6 @@ const RND_GEN_Q: u32 = 0x02;
 const RND_GEN_X: u32 = 0x03;
 
 const TAG_LENGTH: usize = 256 / 8;
-
-const OBJECT_DATA: u8 = 1;
-const OBJECT_FIELD: u8 = 2;
-const OBJECT_ENTRY: u8 = 3;
-const OBJECT_DATA_HASH_TABLE: u8 = 4;
-const OBJECT_FIELD_HASH_TABLE: u8 = 5;
-const OBJECT_ENTRY_ARRAY: u8 = 6;
-const OBJECT_TAG: u8 = 7;
 
 const VERIFY_READ_CHUNK_SIZE: usize = 64 * 1024;
 

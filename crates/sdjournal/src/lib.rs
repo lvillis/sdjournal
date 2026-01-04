@@ -11,6 +11,7 @@ mod entry;
 mod error;
 mod file;
 mod follow;
+mod format;
 mod journal;
 mod query;
 mod reader;

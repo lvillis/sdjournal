@@ -99,6 +99,81 @@ impl JournalQuery {
         self
     }
 
+    /// Match entries for a specific systemd unit.
+    ///
+    /// This expands to an OR over common unit fields:
+    /// `(_SYSTEMD_UNIT=unit) OR (UNIT=unit) OR (OBJECT_SYSTEMD_UNIT=unit)`.
+    ///
+    /// The resulting unit filter is AND-ed with any existing query terms.
+    pub fn match_unit(&mut self, unit: &str) -> &mut Self {
+        self.match_unit_bytes(unit.as_bytes())
+    }
+
+    /// Same as [`JournalQuery::match_unit`], but accepts the unit name as bytes.
+    pub fn match_unit_bytes(&mut self, unit: &[u8]) -> &mut Self {
+        if self.invalid_reason.is_some() {
+            return self;
+        }
+
+        let max_terms = self.journal.inner.config.max_query_terms;
+        let global_len = self.global_terms.len();
+        let new_total_terms = if self.or_groups.is_empty() {
+            global_len.saturating_add(3)
+        } else {
+            let mut old_groups_terms = 0usize;
+            for g in &self.or_groups {
+                old_groups_terms = old_groups_terms.saturating_add(g.len());
+            }
+            let old_groups = self.or_groups.len();
+
+            // Distribute a 3-way OR across existing OR branches:
+            // (G1 OR G2 OR ...) AND (U1 OR U2 OR U3)
+            // => (G1+U1) OR (G1+U2) OR (G1+U3) OR (G2+U1) ...
+            global_len
+                .saturating_add(old_groups_terms.saturating_mul(3))
+                .saturating_add(old_groups.saturating_mul(3))
+        };
+
+        if new_total_terms > max_terms {
+            self.too_many_terms = true;
+            return self;
+        }
+
+        fn unit_term(field: &str, unit: &[u8]) -> MatchTerm {
+            let mut payload =
+                Vec::with_capacity(field.len().saturating_add(1).saturating_add(unit.len()));
+            payload.extend_from_slice(field.as_bytes());
+            payload.push(b'=');
+            payload.extend_from_slice(unit);
+            MatchTerm::Exact {
+                field: field.to_string(),
+                value: unit.to_vec(),
+                payload,
+            }
+        }
+
+        let unit_terms = ["_SYSTEMD_UNIT", "UNIT", "OBJECT_SYSTEMD_UNIT"];
+
+        if self.or_groups.is_empty() {
+            self.or_groups = unit_terms
+                .iter()
+                .map(|f| vec![unit_term(f, unit)])
+                .collect();
+            return self;
+        }
+
+        let mut next = Vec::with_capacity(self.or_groups.len().saturating_mul(3));
+        for group in &self.or_groups {
+            for field in unit_terms {
+                let mut g = group.clone();
+                g.push(unit_term(field, unit));
+                next.push(g);
+            }
+        }
+        self.or_groups = next;
+        self
+    }
+
     pub fn or_group<F>(&mut self, f: F) -> &mut Self
     where
         F: FnOnce(&mut OrGroupBuilder),
@@ -1281,5 +1356,88 @@ mod tests {
                 }
             )),
         }
+    }
+
+    #[test]
+    fn match_unit_builds_three_or_branches() {
+        let journal = empty_journal_with_config(JournalConfig::default());
+        let mut q = JournalQuery::new(journal);
+        q.match_present("PRIORITY");
+        q.match_unit("sshd.service");
+
+        assert_eq!(q.or_groups.len(), 3);
+        let branches = build_branches(&q);
+        assert_eq!(branches.len(), 3);
+        for b in &branches {
+            assert_eq!(b.len(), 2);
+            assert!(matches!(&b[0], MatchTerm::Present { field } if field == "PRIORITY"));
+        }
+
+        let unit_fields: std::collections::BTreeSet<&str> = branches
+            .iter()
+            .map(|b| match &b[1] {
+                MatchTerm::Exact {
+                    field,
+                    value,
+                    payload,
+                } => {
+                    assert_eq!(value, b"sshd.service");
+                    let expected = [field.as_bytes(), b"=", value.as_slice()].concat();
+                    assert_eq!(payload, &expected);
+                    field.as_str()
+                }
+                _ => panic!("expected exact unit match term"),
+            })
+            .collect();
+        assert_eq!(
+            unit_fields,
+            std::collections::BTreeSet::from(["_SYSTEMD_UNIT", "OBJECT_SYSTEMD_UNIT", "UNIT"])
+        );
+    }
+
+    #[test]
+    fn match_unit_distributes_over_existing_or_groups() {
+        let journal = empty_journal_with_config(JournalConfig::default());
+        let mut q = JournalQuery::new(journal);
+        q.or_group(|g| {
+            g.match_present("A");
+        });
+        q.or_group(|g| {
+            g.match_present("B");
+        });
+        q.match_unit("foo.service");
+
+        assert_eq!(q.or_groups.len(), 6);
+        for g in &q.or_groups {
+            assert_eq!(g.len(), 2);
+            assert!(matches!(&g[0], MatchTerm::Present { .. }));
+            assert!(matches!(&g[1], MatchTerm::Exact { .. }));
+        }
+
+        let mut a = 0usize;
+        let mut b = 0usize;
+        for g in &q.or_groups {
+            match &g[0] {
+                MatchTerm::Present { field } if field == "A" => a += 1,
+                MatchTerm::Present { field } if field == "B" => b += 1,
+                _ => panic!("unexpected first term"),
+            }
+        }
+        assert_eq!(a, 3);
+        assert_eq!(b, 3);
+    }
+
+    #[test]
+    fn match_unit_respects_max_query_terms() {
+        let cfg = JournalConfig {
+            max_query_terms: 2,
+            ..Default::default()
+        };
+        let journal = empty_journal_with_config(cfg);
+        let mut q = JournalQuery::new(journal);
+        q.match_unit("sshd.service");
+
+        assert!(q.too_many_terms);
+        assert!(q.or_groups.is_empty());
     }
 }
