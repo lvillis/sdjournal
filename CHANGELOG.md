@@ -8,6 +8,7 @@
 
 - Strengthen tests, fuzz targets, and examples
 - *(ci)* Update
+- *(release)* 0.1.7
 ## [0.1.6] - 2026-01-04
 
 ### 🚜 Refactor
