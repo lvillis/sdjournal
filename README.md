@@ -46,17 +46,35 @@ for item in q.iter()? {
 ## Cursor checkpoint (resume after restart)
 
 An end-to-end example that persists the last cursor and resumes via `after_cursor` is in:
-- `crates/sdjournal/examples/checkpoint_follow.rs`
+- `examples/checkpoint_follow.rs`
 
 Run it on Linux:
 
 ```bash
-cargo run -p sdjournal --example checkpoint_follow -- sshd.service /var/tmp/sdjournal.cursor
+cargo run --example checkpoint_follow -- sshd.service /var/tmp/sdjournal.cursor
 ```
+
+## Examples
+
+- `open_dir`: open one journal directory and print entries
+- `open_dirs`: merge multiple journal roots
+- `tail`: print the newest entries from the default journal
+- `filter_exact`: query by an exact field/value pair
+- `match_unit`: query one systemd unit
+- `or_units`: OR across two units with `or_group`
+- `recent_unit`: query a unit within a recent time window
+- `print_fields`: dump all fields from the newest matching entry
+- `cursor_roundtrip`: print a cursor and resume from it with `seek_cursor`
+- `after_cursor`: resume strictly after a saved cursor string
+- `follow_unit`: block and print a few newly appended entries
+- `checkpoint_follow`: persist cursors while following
+- `open_with_config`: customize `JournalConfig`
+- `follow_tokio`: use the Tokio follow adapter (`--features tokio`)
+- `verify_seal`: verify FSS tags (`--features verify-seal`)
 
 ## Development
 
 - Format: `cargo fmt`
-- Lint: `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- Test: `cargo test --workspace --all-features`
+- Lint: `cargo clippy --all-targets --all-features -- -D warnings`
+- Test: `cargo test --all-features`
 - Fuzz (nightly): `cargo +nightly fuzz run journal_open`

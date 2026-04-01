@@ -154,7 +154,7 @@ impl Journal {
         let params = crate::seal::FsprgParams::new(key.seed())?;
 
         for f in &self.inner.files {
-            crate::seal::verify_file_seal(f, &key, &params)?;
+            crate::seal::verify_file_seal(f, &params)?;
         }
         Ok(())
     }

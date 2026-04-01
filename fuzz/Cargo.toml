@@ -8,9 +8,14 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-libfuzzer-sys = "0.4"
-sdjournal = { path = "../crates/sdjournal" }
-tempfile = "3"
+# Fuzzing runtime integration.
+libfuzzer-sys = "0.4.12"
+
+# Local crate under test.
+sdjournal = { path = ".." }
+
+# Temporary files used by fuzz harnesses.
+tempfile = "3.27.0"
 
 [[bin]]
 name = "journal_open"

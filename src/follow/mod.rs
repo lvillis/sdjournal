@@ -1,3 +1,8 @@
+#[cfg(feature = "tokio")]
+mod tokio;
+#[cfg(target_os = "linux")]
+mod watcher;
+
 use crate::cursor::Cursor;
 use crate::entry::EntryRef;
 use crate::error::{Result, SdJournalError};
@@ -8,16 +13,14 @@ use std::thread;
 use std::time::Duration;
 
 #[cfg(feature = "tokio")]
-use crate::entry::EntryOwned;
-
-#[cfg(feature = "tracing")]
-use tracing::warn;
+pub use self::tokio::TokioFollow;
+#[cfg(target_os = "linux")]
+use self::watcher::InotifyWatcher;
 
 #[cfg(all(feature = "tracing", target_os = "linux"))]
 use tracing::debug;
-
-#[cfg(feature = "tokio")]
-const DEFAULT_TOKIO_FOLLOW_BUFFER: usize = 1024;
+#[cfg(feature = "tracing")]
+use tracing::warn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FollowStage {
@@ -25,81 +28,10 @@ enum FollowStage {
     Stream,
 }
 
-#[cfg(target_os = "linux")]
-struct InotifyWatcher {
-    inotify: inotify::Inotify,
-    buffer: Vec<u8>,
-}
-
-#[cfg(target_os = "linux")]
-impl InotifyWatcher {
-    fn new(watch_paths: &[PathBuf]) -> Option<Self> {
-        use inotify::WatchMask;
-
-        let inotify = match inotify::Inotify::init() {
-            Ok(v) => v,
-            Err(_) => return None,
-        };
-
-        let mask = WatchMask::MODIFY
-            | WatchMask::CLOSE_WRITE
-            | WatchMask::ATTRIB
-            | WatchMask::CREATE
-            | WatchMask::DELETE
-            | WatchMask::MOVED_FROM
-            | WatchMask::MOVED_TO
-            | WatchMask::MOVE_SELF
-            | WatchMask::DELETE_SELF;
-
-        let mut added = 0usize;
-        for p in watch_paths {
-            if inotify.watches().add(p, mask).is_ok() {
-                added = added.saturating_add(1);
-            }
-        }
-        if added == 0 {
-            return None;
-        }
-
-        Some(Self {
-            inotify,
-            buffer: vec![0u8; 4096],
-        })
-    }
-
-    fn wait(&mut self, timeout: Duration) -> bool {
-        use std::os::unix::io::AsRawFd as _;
-
-        let timeout_ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
-        let fd = self.inotify.as_raw_fd();
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-
-        loop {
-            let r = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
-            if r > 0 {
-                let _ = self.inotify.read_events(&mut self.buffer);
-                return true;
-            }
-            if r == 0 {
-                return false;
-            }
-
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            return false;
-        }
-    }
-}
-
 /// A blocking follow/tail iterator.
 ///
-/// Semantics are specified in `docs/prd.md`.
+/// The iterator first drains matching backlog entries, then reopens the journal set and polls
+/// for new entries while preserving the query template and last observed cursor.
 pub struct Follow {
     roots: Vec<PathBuf>,
     config: crate::config::JournalConfig,
@@ -114,50 +46,6 @@ pub struct Follow {
 
     #[cfg(target_os = "linux")]
     inotify: Option<InotifyWatcher>,
-}
-
-/// An async follow adapter for Tokio.
-///
-/// This is available when the `tokio` feature is enabled.
-#[cfg(feature = "tokio")]
-pub struct TokioFollow {
-    rx: tokio::sync::mpsc::Receiver<Result<EntryOwned>>,
-}
-
-#[cfg(feature = "tokio")]
-impl TokioFollow {
-    pub(crate) fn spawn(follow: Follow) -> Self {
-        let (tx, rx) = tokio::sync::mpsc::channel(DEFAULT_TOKIO_FOLLOW_BUFFER);
-        thread::spawn(move || {
-            let mut f = follow;
-            loop {
-                let item = match f.next() {
-                    Some(v) => v,
-                    None => break,
-                };
-
-                let owned = match item {
-                    Ok(e) => Ok(e.to_owned()),
-                    Err(e) => Err(e),
-                };
-
-                if tx.blocking_send(owned).is_err() {
-                    break;
-                }
-            }
-        });
-        Self { rx }
-    }
-
-    /// Receive the next followed entry.
-    pub async fn next(&mut self) -> Option<Result<EntryOwned>> {
-        self.rx.recv().await
-    }
-
-    /// Convert into the underlying Tokio receiver.
-    pub fn into_receiver(self) -> tokio::sync::mpsc::Receiver<Result<EntryOwned>> {
-        self.rx
-    }
 }
 
 impl Follow {
@@ -237,8 +125,7 @@ impl Follow {
         if let Some(c) = &self.last_cursor {
             q.set_cursor_start(c.clone(), false)?;
         }
-        let it = q.iter()?;
-        self.stream_iter = Some(Box::new(it));
+        self.stream_iter = Some(Box::new(q.iter()?));
         Ok(())
     }
 }

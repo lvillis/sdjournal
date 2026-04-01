@@ -1,34 +1,64 @@
-[workspace]
-members = [
-  "crates/sdjournal",
-]
-exclude = ["fuzz"]
-resolver = "3"
-
-[workspace.package]
-edition = "2024"
-rust-version = "1.92.0"
-license = "MIT"
+[package]
+name = "sdjournal"
+version = "0.1.6"
+description = "Pure Rust systemd journal reader and query engine"
+documentation = "https://docs.rs/sdjournal"
+homepage = "https://github.com/lvillis/sdjournal"
+repository = "https://github.com/lvillis/sdjournal"
 readme = "README.md"
+license = "MIT"
+edition = "2024"
+rust-version = "1.94"
+keywords = ["systemd", "journal", "journald", "logging", "linux"]
+categories = ["os::unix-apis", "parsing", "filesystem"]
+include = [
+    "/src/**",
+    "/examples/**",
+    "/tests/**",
+    "/CHANGELOG.md",
+    "/README.md",
+]
 
-[workspace.dependencies]
-hmac = { version = "0.12.1", default-features = false, features = ["std"] }
-inotify = { version = "0.11.0", default-features = false }
-libc = { version = "0.2.178", default-features = false }
-lz4_flex = { version = "0.12.0", default-features = false, features = ["std", "safe-decode", "checked-decode"] }
-memmap2 = { version = "0.9.9", default-features = false }
-num-bigint = { version = "0.4.6", default-features = false, features = ["std"] }
-num-traits = { version = "0.2.19", default-features = false, features = ["std"] }
-serde = { version = "1.0.228", default-features = false, features = ["derive", "std"] }
-serde_json = { version = "1.0.148", default-features = false, features = ["std"] }
-sha2 = { version = "0.10.9", default-features = false, features = ["std"] }
-tokio = { version = "1.49.0", default-features = false, features = ["sync"] }
-tracing = { version = "0.1.44", default-features = false, features = ["std"] }
-ruzstd = { version = "0.8.2", default-features = false, features = ["std"] }
-siphasher = { version = "1.0.1", default-features = false, features = ["std"] }
-xz2 = { version = "0.1.7", default-features = false, features = ["static"] }
+[features]
+default = ["mmap", "lz4", "zstd"]
+mmap = ["dep:memmap2"]
+lz4 = ["dep:lz4_flex"]
+zstd = ["dep:ruzstd"]
+xz = ["dep:xz2"]
+tracing = ["dep:tracing"]
+tokio = ["dep:tokio"]
+verify-seal = ["dep:hmac", "dep:sha2", "dep:num-bigint", "dep:num-traits"]
 
-[workspace.metadata.release]
+[dependencies]
+# Core parsing and hashing support.
+memmap2 = { version = "0.9.10", default-features = false, optional = true }
+siphasher = { version = "1.0.2", default-features = false, features = ["std"] }
+
+# Optional compression backends for journal DATA payloads.
+lz4_flex = { version = "0.13.0", default-features = false, features = ["std", "safe-decode", "checked-decode"], optional = true }
+ruzstd = { version = "0.8.2", default-features = false, features = ["std"], optional = true }
+xz2 = { version = "0.1.7", default-features = false, features = ["static"], optional = true }
+
+# Optional runtime integrations.
+tokio = { version = "1.50.0", default-features = false, features = ["sync"], optional = true }
+tracing = { version = "0.1.44", default-features = false, features = ["std"], optional = true }
+
+# Optional FSS verification dependencies.
+hmac = { version = "0.13.0", default-features = false, optional = true }
+num-bigint = { version = "0.4.6", default-features = false, features = ["std"], optional = true }
+num-traits = { version = "0.2.19", default-features = false, features = ["std"], optional = true }
+sha2 = { version = "0.11.0", default-features = false, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux-only follow and polling support.
+inotify = { version = "0.11.1", default-features = false }
+libc = { version = "0.2.183", default-features = false }
+
+[dev-dependencies]
+# Test utilities for golden and fixture assertions.
+serde_json = { version = "1.0.149", default-features = false, features = ["std"] }
+
+[package.metadata.release]
 allow-branch = ["main"]
 consolidate-commits = true
 enable-all-features = true
@@ -37,4 +67,4 @@ tag-prefix = ""
 tag-name = "{{version}}"
 tag-message = "chore(release): {{version}}"
 pre-release-commit-message = "chore(release): {{version}}"
-pre-release-hook = ["git", "cliff", "--workdir", "../../", "--output", "../../CHANGELOG.md", "--tag", "{{version}}"]
+pre-release-hook = ["git", "cliff", "--output", "CHANGELOG.md", "--tag", "{{version}}"]

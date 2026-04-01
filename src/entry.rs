@@ -200,3 +200,73 @@ impl EntryRef {
         self.seqnum
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entry_owned_get_prefers_first_duplicate_and_iter_preserves_order() {
+        let entry = EntryOwned::new(
+            [0x11; 16],
+            7,
+            9,
+            11,
+            13,
+            [0x22; 16],
+            vec![
+                ("MESSAGE".to_string(), b"first".to_vec()),
+                ("PRIORITY".to_string(), b"6".to_vec()),
+                ("MESSAGE".to_string(), b"second".to_vec()),
+            ],
+        );
+
+        assert_eq!(entry.get("MESSAGE"), Some(&b"first"[..]));
+        let fields: Vec<(&str, &[u8])> = entry.iter_fields().collect();
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0], ("MESSAGE", &b"first"[..]));
+        assert_eq!(fields[1], ("PRIORITY", &b"6"[..]));
+        assert_eq!(fields[2], ("MESSAGE", &b"second"[..]));
+        assert_eq!(entry.realtime_usec(), 11);
+        assert_eq!(entry.monotonic_usec(), 13);
+        assert_eq!(entry.seqnum(), 9);
+        assert_eq!(entry.boot_id(), [0x22; 16]);
+    }
+
+    #[test]
+    fn entry_ref_to_owned_preserves_visible_fields_and_cursor() {
+        let entry = EntryRef::new_parsed(
+            [0x33; 16],
+            17,
+            19,
+            23,
+            29,
+            [0x44; 16],
+            vec![
+                (
+                    "MESSAGE".to_string(),
+                    ByteBuf::from_vec(b"MESSAGE=hello".to_vec()),
+                    7,
+                ),
+                (
+                    "PRIORITY".to_string(),
+                    ByteBuf::from_vec(b"PRIORITY=5".to_vec()),
+                    8,
+                ),
+            ],
+        );
+
+        let owned = entry.to_owned();
+        assert_eq!(entry.get("MESSAGE"), Some(&b"hello"[..]));
+        assert_eq!(owned.get("MESSAGE"), Some(&b"hello"[..]));
+        assert_eq!(owned.get("PRIORITY"), Some(&b"5"[..]));
+        assert_eq!(
+            entry.cursor().unwrap().to_string(),
+            owned.cursor().unwrap().to_string()
+        );
+        assert_eq!(owned.realtime_usec(), 23);
+        assert_eq!(owned.monotonic_usec(), 29);
+        assert_eq!(owned.seqnum(), 19);
+        assert_eq!(owned.boot_id(), [0x44; 16]);
+    }
+}

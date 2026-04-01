@@ -487,4 +487,45 @@ mod tests {
         );
         assert_eq!(parsed.to_string(), s);
     }
+
+    #[test]
+    fn cursor_systemd_fields_variant_roundtrip() {
+        let c = Cursor::parse("t=3").unwrap();
+        let s = c.to_string();
+        assert!(s.starts_with(PREFIX_V1));
+
+        let parsed = Cursor::parse(&s).unwrap();
+        assert_eq!(parsed.to_string(), s);
+        assert!(parsed.systemd().is_some());
+        assert!(parsed.file_offset().is_none());
+    }
+
+    #[test]
+    fn cursor_rejects_empty_systemd_cursor() {
+        match Cursor::parse("") {
+            Ok(_) => panic!("expected InvalidQuery"),
+            Err(err) => assert!(matches!(err, SdJournalError::InvalidQuery { .. })),
+        }
+    }
+
+    #[test]
+    fn cursor_rejects_empty_sj1_payload() {
+        match Cursor::parse(PREFIX_V1) {
+            Ok(_) => panic!("expected InvalidQuery"),
+            Err(err) => assert!(matches!(err, SdJournalError::InvalidQuery { .. })),
+        }
+    }
+
+    #[test]
+    fn cursor_rejects_invalid_entry_key_length() {
+        let mut bytes = Vec::new();
+        bytes.push(TAG_ENTRY_KEY);
+        bytes.extend_from_slice(&[0x11u8; 16]);
+        let s = format!("{PREFIX_V1}{}", hex_encode(&bytes));
+
+        match Cursor::parse(&s) {
+            Ok(_) => panic!("expected InvalidQuery"),
+            Err(err) => assert!(matches!(err, SdJournalError::InvalidQuery { .. })),
+        }
+    }
 }
