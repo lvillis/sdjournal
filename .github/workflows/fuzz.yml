@@ -5,9 +5,26 @@ on:
   schedule:
     - cron: "0 3 * * 0"
 
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: nightly
+
 jobs:
   fuzz:
-    runs-on: ubuntu-latest
+    name: fuzz (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [journal_open, cursor_parse]
     steps:
       - uses: actions/checkout@v4
 
@@ -17,10 +34,14 @@ jobs:
           components: llvm-tools-preview
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
 
-      - name: Run fuzz targets (short)
-        env:
-          RUSTUP_TOOLCHAIN: nightly
-        run: |
-          cargo fuzz run journal_open -- -max_total_time=60
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fuzz-nightly
+
+      - name: Run fuzz target (short)
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60
