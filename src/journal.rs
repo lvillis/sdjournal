@@ -239,3 +239,81 @@ fn is_journal_file(path: &Path, config: &JournalConfig) -> bool {
         _ => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::{self, File};
+    use tempfile::tempdir;
+
+    #[test]
+    fn open_dirs_rejects_empty_path_list() {
+        match Journal::open_dirs_with_config(&[], JournalConfig::default()) {
+            Err(SdJournalError::InvalidQuery { reason }) => {
+                assert_eq!(reason, "open_dirs requires at least one path");
+            }
+            Ok(_) => panic!("expected InvalidQuery"),
+            Err(other) => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn machine_id_dir_requires_exactly_32_hex_chars() {
+        assert!(is_machine_id_dir(OsStr::new(
+            "0123456789abcdef0123456789abcdef"
+        )));
+        assert!(!is_machine_id_dir(OsStr::new(
+            "0123456789abcdef0123456789abcde"
+        )));
+        assert!(!is_machine_id_dir(OsStr::new(
+            "0123456789abcdef0123456789abcdeg"
+        )));
+        assert!(!is_machine_id_dir(OsStr::new("not-a-machine-id")));
+    }
+
+    #[test]
+    fn discover_journal_paths_finds_root_and_machine_id_files() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let machine_id = root.join("0123456789abcdef0123456789abcdef");
+        let ignored_dir = root.join("not-machine-id");
+
+        fs::create_dir(&machine_id).unwrap();
+        fs::create_dir(&ignored_dir).unwrap();
+
+        let root_journal = root.join("root.journal");
+        let nested_journal = machine_id.join("nested.journal");
+        let tilde_journal = root.join("temp.journal~");
+        let ignored_journal = ignored_dir.join("ignored.journal");
+        let not_journal = root.join("notes.log");
+
+        File::create(&root_journal).unwrap();
+        File::create(&nested_journal).unwrap();
+        File::create(&tilde_journal).unwrap();
+        File::create(&ignored_journal).unwrap();
+        File::create(&not_journal).unwrap();
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&root_journal, root.join("link.journal")).unwrap();
+
+        let mut out = Vec::new();
+        discover_journal_paths(root, &JournalConfig::default(), &mut out).unwrap();
+        out.sort();
+
+        assert_eq!(out, vec![nested_journal.clone(), root_journal.clone()]);
+
+        out.clear();
+        discover_journal_paths(
+            root,
+            &JournalConfig {
+                include_journal_tilde: true,
+                ..Default::default()
+            },
+            &mut out,
+        )
+        .unwrap();
+        out.sort();
+
+        assert_eq!(out, vec![nested_journal, root_journal, tilde_journal]);
+    }
+}

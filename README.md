@@ -54,21 +54,39 @@ Run it on Linux:
 cargo run --example checkpoint_follow -- sshd.service /var/tmp/sdjournal.cursor
 ```
 
+## Start Here
+
+If you want to understand the crate quickly, read or run these examples in order:
+- `tour`: guided walkthrough of `Journal`, `JournalQuery`, `EntryRef`/`EntryOwned`, `Cursor`, and `Follow`
+- `tail`: the smallest “open default journal and read entries” path
+- `match_unit`: the most common production filter shape
+- `checkpoint_follow`: resume-safe follow loop for long-running consumers
+
 ## Examples
 
+Open / discovery:
+- `tour`: guided API overview and mental model
 - `open_dir`: open one journal directory and print entries
 - `open_dirs`: merge multiple journal roots
+- `open_with_config`: customize `JournalConfig`
+
+Query builder patterns:
 - `tail`: print the newest entries from the default journal
 - `filter_exact`: query by an exact field/value pair
+- `match_present`: query by field presence
 - `match_unit`: query one systemd unit
 - `or_units`: OR across two units with `or_group`
 - `recent_unit`: query a unit within a recent time window
 - `print_fields`: dump all fields from the newest matching entry
+- `collect_owned`: detach results into `EntryOwned`
+
+Cursor / resume:
 - `cursor_roundtrip`: print a cursor and resume from it with `seek_cursor`
 - `after_cursor`: resume strictly after a saved cursor string
-- `follow_unit`: block and print a few newly appended entries
 - `checkpoint_follow`: persist cursors while following
-- `open_with_config`: customize `JournalConfig`
+
+Streaming / integration:
+- `follow_unit`: block and print a few newly appended entries
 - `follow_tokio`: use the Tokio follow adapter (`--features tokio`)
 - `verify_seal`: verify FSS tags (`--features verify-seal`)
 

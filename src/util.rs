@@ -223,3 +223,90 @@ pub(crate) mod hash {
         (c, b)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checked_add_u64_reports_overflow_with_context() {
+        let err = checked_add_u64(u64::MAX, 1, "read range").unwrap_err();
+        match err {
+            SdJournalError::Corrupt {
+                path,
+                offset,
+                reason,
+            } => {
+                assert!(path.is_none());
+                assert!(offset.is_none());
+                assert_eq!(
+                    reason,
+                    "read range: overflow when adding 18446744073709551615 + 1"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn take_and_read_helpers_handle_bounds() {
+        let buf = [1u8, 2, 3, 4, 5, 6, 7, 8, 9];
+
+        assert_eq!(take::<4>(&buf, 1), Some([2, 3, 4, 5]));
+        assert_eq!(take::<4>(&buf, 6), None);
+
+        assert_eq!(read_u8(&buf, 0), Some(1));
+        assert_eq!(read_u8(&buf, 99), None);
+
+        assert_eq!(read_u32_le(&buf, 1), Some(u32::from_le_bytes([2, 3, 4, 5])));
+        assert_eq!(
+            read_u64_le(&buf, 1),
+            Some(u64::from_le_bytes([2, 3, 4, 5, 6, 7, 8, 9]))
+        );
+        assert_eq!(read_u64_le(&buf, 2), None);
+        assert_eq!(read_id128(&buf, 0), None);
+    }
+
+    #[test]
+    fn ascii_field_name_validation_rejects_forbidden_bytes() {
+        assert!(is_ascii_field_name(b"MESSAGE"));
+        assert!(is_ascii_field_name(b"_SYSTEMD_UNIT"));
+        assert!(!is_ascii_field_name(b"BAD=FIELD"));
+        assert!(!is_ascii_field_name(b"BAD\0FIELD"));
+        assert!(!is_ascii_field_name("字段".as_bytes()));
+    }
+
+    #[test]
+    fn hex_roundtrip_and_decode_rejects_invalid_input() {
+        let bytes = [0x00, 0x7f, 0xa5, 0xff];
+        assert_eq!(hex_encode(&bytes), "007fa5ff");
+        assert_eq!(hex_decode("007FA5ff").unwrap(), bytes);
+
+        match hex_decode("abc") {
+            Err(SdJournalError::InvalidQuery { reason }) => {
+                assert_eq!(reason, "hex string must have even length");
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+
+        match hex_decode("zz") {
+            Err(SdJournalError::InvalidQuery { reason }) => {
+                assert_eq!(reason, "invalid hex digit");
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ensure_limit_usize_allows_equal_and_rejects_greater() {
+        ensure_limit_usize(LimitKind::FieldsPerEntry, 3, 3).unwrap();
+
+        match ensure_limit_usize(LimitKind::FieldsPerEntry, 3, 4) {
+            Err(SdJournalError::LimitExceeded { kind, limit }) => {
+                assert_eq!(kind, LimitKind::FieldsPerEntry);
+                assert_eq!(limit, 3);
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+}

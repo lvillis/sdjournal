@@ -72,3 +72,13 @@ impl InotifyWatcher {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watcher_new_returns_none_without_paths() {
+        assert!(InotifyWatcher::new(&[]).is_none());
+    }
+}

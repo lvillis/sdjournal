@@ -528,4 +528,65 @@ mod tests {
             Err(err) => assert!(matches!(err, SdJournalError::InvalidQuery { .. })),
         }
     }
+
+    #[test]
+    fn cursor_rejects_unknown_sj1_variant() {
+        let s = format!("{PREFIX_V1}{}", hex_encode(&[0xff]));
+
+        match Cursor::parse(&s) {
+            Err(SdJournalError::Unsupported { reason }) => {
+                assert_eq!(reason, "unknown SJ1 cursor variant");
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cursor_rejects_invalid_utf8_in_systemd_raw_variant() {
+        let s = format!("{PREFIX_V1}{}", hex_encode(&[TAG_SYSTEMD_RAW, 0xff]));
+
+        match Cursor::parse(&s) {
+            Err(SdJournalError::InvalidQuery { reason }) => {
+                assert_eq!(reason, "invalid UTF-8 in SJ1 systemd cursor");
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cursor_rejects_trailing_bytes_in_systemd_fields_payload() {
+        let mut bytes = Vec::new();
+        bytes.push(TAG_SYSTEMD_FIELDS);
+        bytes.push(SYSTEMD_MASK_REALTIME);
+        bytes.extend_from_slice(&3u64.to_le_bytes());
+        bytes.push(0xaa);
+        let s = format!("{PREFIX_V1}{}", hex_encode(&bytes));
+
+        match Cursor::parse(&s) {
+            Err(SdJournalError::InvalidQuery { reason }) => {
+                assert_eq!(reason, "trailing bytes in systemd cursor payload");
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cursor_rejects_systemd_cursor_without_required_fields() {
+        match Cursor::parse("x=1") {
+            Err(SdJournalError::InvalidQuery { reason }) => {
+                assert_eq!(reason, "systemd cursor missing required fields");
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cursor_rejects_invalid_systemd_segment_syntax() {
+        match Cursor::parse("broken-segment") {
+            Err(SdJournalError::InvalidQuery { reason }) => {
+                assert_eq!(reason, "invalid systemd cursor segment");
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
 }

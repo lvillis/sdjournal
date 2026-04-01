@@ -212,3 +212,143 @@ impl Iterator for Follow {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::JournalConfig;
+    use crate::journal::JournalInner;
+    use crate::reader::ByteBuf;
+    use std::sync::Arc;
+
+    fn empty_journal_with_config(config: JournalConfig) -> Journal {
+        Journal {
+            inner: Arc::new(JournalInner {
+                config,
+                roots: Vec::new(),
+                files: Vec::new(),
+            }),
+        }
+    }
+
+    fn sample_entry() -> EntryRef {
+        EntryRef::new_parsed(
+            [0x11; 16],
+            7,
+            9,
+            11,
+            13,
+            [0x22; 16],
+            vec![(
+                "MESSAGE".to_string(),
+                ByteBuf::from_vec(b"MESSAGE=hello".to_vec()),
+                "MESSAGE".len(),
+            )],
+        )
+    }
+
+    #[test]
+    fn follow_new_initializes_stage_and_backoff() {
+        let config = JournalConfig::default();
+        let query = JournalQuery::new(empty_journal_with_config(config.clone()));
+        let follow = Follow::new(
+            vec![PathBuf::from("/tmp")],
+            config.clone(),
+            query,
+            Box::new(std::iter::empty()),
+            None,
+        );
+
+        assert_eq!(follow.stage, FollowStage::CatchUp);
+        assert_eq!(follow.backoff, config.poll_interval);
+        assert!(follow.catchup_iter.is_some());
+        assert!(follow.stream_iter.is_none());
+        assert!(follow.last_cursor.is_none());
+    }
+
+    #[test]
+    fn follow_reset_backoff_restores_poll_interval() {
+        let config = JournalConfig::default();
+        let query = JournalQuery::new(empty_journal_with_config(config.clone()));
+        let mut follow = Follow::new(
+            Vec::new(),
+            config.clone(),
+            query,
+            Box::new(std::iter::empty()),
+            None,
+        );
+        follow.backoff = Duration::from_millis(999);
+
+        follow.reset_backoff();
+
+        assert_eq!(follow.backoff, config.poll_interval);
+    }
+
+    #[test]
+    fn follow_update_last_cursor_tracks_entry_cursor() {
+        let config = JournalConfig::default();
+        let query = JournalQuery::new(empty_journal_with_config(config));
+        let mut follow = Follow::new(
+            Vec::new(),
+            JournalConfig::default(),
+            query,
+            Box::new(std::iter::empty()),
+            None,
+        );
+        let entry = sample_entry();
+
+        follow.update_last_cursor(&entry).unwrap();
+
+        assert_eq!(
+            follow.last_cursor.as_ref().map(ToString::to_string),
+            Some(entry.cursor().unwrap().to_string())
+        );
+    }
+
+    #[test]
+    fn follow_next_propagates_catchup_errors() {
+        let config = JournalConfig::default();
+        let query = JournalQuery::new(empty_journal_with_config(config.clone()));
+        let mut follow = Follow::new(
+            Vec::new(),
+            config,
+            query,
+            Box::new(std::iter::once(Err(SdJournalError::InvalidQuery {
+                reason: "boom".to_string(),
+            }))),
+            None,
+        );
+
+        match follow.next() {
+            Some(Err(SdJournalError::InvalidQuery { reason })) => assert_eq!(reason, "boom"),
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn follow_next_transitions_empty_catchup_into_stream_refresh() {
+        let config = JournalConfig {
+            poll_interval: Duration::from_millis(0),
+            max_follow_backoff: Duration::from_millis(0),
+            ..Default::default()
+        };
+        let query = JournalQuery::new(empty_journal_with_config(config.clone()));
+        let mut follow = Follow::new(
+            Vec::new(),
+            config,
+            query,
+            Box::new(std::iter::empty()),
+            None,
+        );
+
+        match follow.next() {
+            Some(Err(SdJournalError::InvalidQuery { reason })) => {
+                assert_eq!(reason, "open_dirs requires at least one path");
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+
+        assert_eq!(follow.stage, FollowStage::Stream);
+        assert!(follow.catchup_iter.is_none());
+    }
+}

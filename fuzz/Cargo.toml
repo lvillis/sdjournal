@@ -14,11 +14,14 @@ libfuzzer-sys = "0.4.12"
 # Local crate under test.
 sdjournal = { path = ".." }
 
-# Temporary files used by fuzz harnesses.
-tempfile = "3.27.0"
-
 [[bin]]
 name = "journal_open"
 path = "fuzz_targets/journal_open.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cursor_parse"
+path = "fuzz_targets/cursor_parse.rs"
 test = false
 doc = false

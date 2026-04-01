@@ -54,3 +54,25 @@ impl Default for JournalConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_values_are_stable() {
+        let cfg = JournalConfig::default();
+
+        assert_eq!(cfg.max_object_size_bytes, 16 * 1024 * 1024);
+        assert_eq!(cfg.max_decompressed_bytes, 1024 * 1024);
+        assert_eq!(cfg.max_field_name_len, 128);
+        assert_eq!(cfg.max_fields_per_entry, 256);
+        assert_eq!(cfg.max_journal_files, 1024);
+        assert_eq!(cfg.max_object_chain_steps, 1_000_000);
+        assert_eq!(cfg.max_query_terms, 64);
+        assert!(!cfg.allow_mmap_online);
+        assert!(!cfg.include_journal_tilde);
+        assert_eq!(cfg.max_follow_backoff, Duration::from_millis(2000));
+        assert_eq!(cfg.poll_interval, Duration::from_millis(2000));
+    }
+}

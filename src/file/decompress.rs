@@ -116,3 +116,71 @@ pub(super) fn decompress_xz(_src: &[u8], _max: usize) -> Result<Vec<u8>> {
         reason: "xz support is disabled (feature xz)".to_string(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "lz4")]
+    #[test]
+    fn lz4_roundtrip_and_limit_checks() {
+        let plain = b"hello from lz4";
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(&(plain.len() as u64).to_le_bytes());
+        encoded.extend_from_slice(&lz4_flex::block::compress(plain));
+
+        assert_eq!(decompress_lz4(&encoded, plain.len()).unwrap(), plain);
+
+        match decompress_lz4(&encoded, plain.len() - 1) {
+            Err(SdJournalError::LimitExceeded { kind, limit }) => {
+                assert_eq!(kind, LimitKind::DecompressedBytes);
+                assert_eq!(limit, (plain.len() - 1) as u64);
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "lz4")]
+    #[test]
+    fn lz4_rejects_short_payload() {
+        match decompress_lz4(&[0u8; 8], 128) {
+            Err(SdJournalError::DecompressFailed { algo, reason }) => {
+                assert_eq!(algo, CompressionAlgo::Lz4);
+                assert_eq!(reason, "lz4 payload too short");
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn zstd_rejects_invalid_payload() {
+        match decompress_zstd(b"not zstd", 128) {
+            Err(SdJournalError::DecompressFailed { algo, .. }) => {
+                assert_eq!(algo, CompressionAlgo::Zstd);
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "xz")]
+    #[test]
+    fn xz_roundtrip_and_limit_checks() {
+        use std::io::Write as _;
+
+        let plain = b"hello from xz";
+        let mut encoder = xz2::write::XzEncoder::new(Vec::new(), 6);
+        encoder.write_all(plain).unwrap();
+        let encoded = encoder.finish().unwrap();
+
+        assert_eq!(decompress_xz(&encoded, plain.len()).unwrap(), plain);
+
+        match decompress_xz(&encoded, plain.len() - 1) {
+            Err(SdJournalError::LimitExceeded { kind, limit }) => {
+                assert_eq!(kind, LimitKind::DecompressedBytes);
+                assert_eq!(limit, (plain.len() - 1) as u64);
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+}

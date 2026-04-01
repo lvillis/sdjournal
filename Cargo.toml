@@ -57,6 +57,7 @@ libc = { version = "0.2.183", default-features = false }
 [dev-dependencies]
 # Test utilities for golden and fixture assertions.
 serde_json = { version = "1.0.149", default-features = false, features = ["std"] }
+tempfile = { version = "3.27.0", default-features = false }
 
 [package.metadata.release]
 allow-branch = ["main"]

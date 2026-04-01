@@ -80,3 +80,5 @@ AGENTS.md
 fuzz/artifacts/
 fuzz/corpus/
 fuzz/target/
+
+.codex

@@ -710,4 +710,110 @@ mod tests {
             )),
         }
     }
+
+    #[test]
+    fn empty_or_group_is_ignored() {
+        let journal = empty_journal_with_config(JournalConfig::default());
+        let mut q = JournalQuery::new(journal);
+
+        q.or_group(|_| {});
+
+        assert!(q.or_groups.is_empty());
+        assert!(q.global_terms.is_empty());
+    }
+
+    #[test]
+    fn after_cursor_sets_exclusive_start() {
+        let journal = empty_journal_with_config(JournalConfig::default());
+        let mut q = JournalQuery::new(journal);
+        let cursor = Cursor::parse("t=42").unwrap();
+
+        q.after_cursor(cursor.clone());
+
+        match &q.cursor_start {
+            Some((saved, inclusive)) => {
+                assert_eq!(saved.to_string(), cursor.to_string());
+                assert!(!inclusive);
+            }
+            None => panic!("expected cursor_start to be set"),
+        }
+    }
+
+    #[test]
+    fn build_branches_without_or_groups_uses_global_terms_only() {
+        let journal = empty_journal_with_config(JournalConfig::default());
+        let mut q = JournalQuery::new(journal);
+        q.match_present("PRIORITY");
+
+        let branches = build_branches(&q);
+        assert_eq!(branches.len(), 1);
+        assert!(matches!(
+            &branches[0][0],
+            MatchTerm::Present { field } if field == "PRIORITY"
+        ));
+    }
+
+    #[test]
+    fn term_matches_handles_exact_and_present_terms() {
+        let entry = EntryOwned::new(
+            [0x11; 16],
+            7,
+            9,
+            11,
+            13,
+            [0x22; 16],
+            vec![
+                ("MESSAGE".to_string(), b"hello".to_vec()),
+                ("PRIORITY".to_string(), b"6".to_vec()),
+            ],
+        );
+
+        assert!(term_matches(
+            &entry,
+            &MatchTerm::Exact {
+                field: "MESSAGE".to_string(),
+                value: b"hello".to_vec(),
+                payload: b"MESSAGE=hello".to_vec(),
+            }
+        ));
+        assert!(!term_matches(
+            &entry,
+            &MatchTerm::Exact {
+                field: "MESSAGE".to_string(),
+                value: b"nope".to_vec(),
+                payload: b"MESSAGE=nope".to_vec(),
+            }
+        ));
+        assert!(term_matches(
+            &entry,
+            &MatchTerm::Present {
+                field: "PRIORITY".to_string(),
+            }
+        ));
+        assert!(!term_matches(
+            &entry,
+            &MatchTerm::Present {
+                field: "SYSLOG_IDENTIFIER".to_string(),
+            }
+        ));
+    }
+
+    #[test]
+    fn field_name_length_limit_is_inclusive() {
+        let cfg = JournalConfig {
+            max_field_name_len: 3,
+            ..Default::default()
+        };
+        let journal = empty_journal_with_config(cfg);
+        let mut q = JournalQuery::new(journal);
+
+        q.match_present("ABC");
+        assert!(q.invalid_reason.is_none());
+
+        q.match_present("ABCD");
+        assert_eq!(
+            q.invalid_reason.as_deref(),
+            Some("invalid query: field name too long")
+        );
+    }
 }

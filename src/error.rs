@@ -143,3 +143,68 @@ impl std::error::Error for SdJournalError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::error::Error as _;
+
+    #[test]
+    fn display_names_for_compression_algo_and_limit_kind_are_stable() {
+        assert_eq!(CompressionAlgo::Xz.to_string(), "xz");
+        assert_eq!(CompressionAlgo::Lz4.to_string(), "lz4");
+        assert_eq!(CompressionAlgo::Zstd.to_string(), "zstd");
+
+        assert_eq!(LimitKind::ObjectSizeBytes.to_string(), "object_size_bytes");
+        assert_eq!(
+            LimitKind::DecompressedBytes.to_string(),
+            "decompressed_bytes"
+        );
+        assert_eq!(LimitKind::FieldNameLen.to_string(), "field_name_len");
+        assert_eq!(LimitKind::FieldsPerEntry.to_string(), "fields_per_entry");
+        assert_eq!(
+            LimitKind::ObjectChainSteps.to_string(),
+            "object_chain_steps"
+        );
+        assert_eq!(LimitKind::JournalFiles.to_string(), "journal_files");
+        assert_eq!(LimitKind::QueryTerms.to_string(), "query_terms");
+    }
+
+    #[test]
+    fn error_display_and_source_cover_structured_variants() {
+        let io_source = std::io::Error::other("disk gone");
+        let io_err = SdJournalError::io(
+            "read_at",
+            Some(PathBuf::from("/tmp/test.journal")),
+            io_source,
+        );
+        assert_eq!(
+            io_err.to_string(),
+            "io error during read_at for /tmp/test.journal: disk gone"
+        );
+        assert_eq!(
+            io_err
+                .source()
+                .expect("io variant should expose a source")
+                .to_string(),
+            "disk gone"
+        );
+
+        let corrupt = SdJournalError::Corrupt {
+            path: Some(PathBuf::from("/tmp/test.journal")),
+            offset: Some(64),
+            reason: "bad header".to_string(),
+        };
+        assert_eq!(
+            corrupt.to_string(),
+            "corrupt journal at /tmp/test.journal (offset 64): bad header"
+        );
+
+        let limit = SdJournalError::LimitExceeded {
+            kind: LimitKind::QueryTerms,
+            limit: 64,
+        };
+        assert_eq!(limit.to_string(), "limit exceeded (query_terms): 64");
+        assert!(limit.source().is_none());
+    }
+}

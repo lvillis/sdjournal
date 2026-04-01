@@ -361,8 +361,117 @@ pub(crate) fn compression_from_object_flags(flags: u8) -> Result<Option<Compress
 
 #[cfg(test)]
 mod tests {
-    use super::parse_entry_data_offsets_bytes;
+    use super::*;
+    use crate::error::LimitKind;
     use std::path::Path;
+
+    fn sample_header_bytes(compatible_flags: u32, incompatible_flags: u32) -> Vec<u8> {
+        let mut buf = vec![0u8; 184];
+        buf[0..8].copy_from_slice(HEADER_SIGNATURE);
+        buf[8..12].copy_from_slice(&compatible_flags.to_le_bytes());
+        buf[12..16].copy_from_slice(&incompatible_flags.to_le_bytes());
+        buf[16] = STATE_ARCHIVED;
+        buf[24..40].copy_from_slice(&[0x11; 16]);
+        buf[40..56].copy_from_slice(&[0x22; 16]);
+        buf[56..72].copy_from_slice(&[0x33; 16]);
+        buf[72..88].copy_from_slice(&[0x44; 16]);
+        buf[88..96].copy_from_slice(&184u64.to_le_bytes());
+        buf[96..104].copy_from_slice(&4096u64.to_le_bytes());
+        buf[104..112].copy_from_slice(&256u64.to_le_bytes());
+        buf[112..120].copy_from_slice(&64u64.to_le_bytes());
+        buf[120..128].copy_from_slice(&320u64.to_le_bytes());
+        buf[128..136].copy_from_slice(&64u64.to_le_bytes());
+        buf[136..144].copy_from_slice(&512u64.to_le_bytes());
+        buf[152..160].copy_from_slice(&7u64.to_le_bytes());
+        buf[176..184].copy_from_slice(&768u64.to_le_bytes());
+        buf
+    }
+
+    #[test]
+    fn header_parse_accepts_minimal_header_and_reports_flags() {
+        #[cfg(any(feature = "tracing", feature = "verify-seal"))]
+        let compatible_flags = HEADER_COMPATIBLE_SEALED | HEADER_COMPATIBLE_SEALED_CONTINUOUS;
+        #[cfg(not(any(feature = "tracing", feature = "verify-seal")))]
+        let compatible_flags = 0u32;
+
+        let header = Header::parse(
+            &sample_header_bytes(
+                compatible_flags,
+                HEADER_INCOMPATIBLE_COMPACT | HEADER_INCOMPATIBLE_KEYED_HASH,
+            ),
+            Path::new("dummy"),
+        )
+        .unwrap();
+
+        assert_eq!(header.state, STATE_ARCHIVED);
+        assert_eq!(header.file_id, [0x11; 16]);
+        assert_eq!(header.machine_id, [0x22; 16]);
+        assert_eq!(header.boot_id, [0x33; 16]);
+        assert_eq!(header.seqnum_id, [0x44; 16]);
+        assert_eq!(header.header_size, 184);
+        assert_eq!(header.n_entries, 7);
+        assert_eq!(header.entry_array_offset, 768);
+        assert!(header.is_compact());
+        assert!(header.is_keyed_hash());
+        #[cfg(any(feature = "tracing", feature = "verify-seal"))]
+        {
+            assert!(header.is_sealed());
+            assert!(header.is_sealed_continuous());
+        }
+    }
+
+    #[test]
+    fn header_parse_rejects_unknown_incompatible_flags() {
+        match Header::parse(
+            &sample_header_bytes(0, HEADER_INCOMPATIBLE_COMPACT | (1 << 31)),
+            Path::new("dummy"),
+        ) {
+            Err(SdJournalError::Unsupported { reason }) => {
+                assert_eq!(reason, "unknown incompatible flags: 0x80000010");
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn object_header_parse_rejects_truncated_input() {
+        match ObjectHeader::parse(&[OBJECT_ENTRY, 0], Path::new("dummy"), 64) {
+            Err(SdJournalError::Corrupt {
+                path,
+                offset,
+                reason,
+            }) => {
+                assert_eq!(path, Some(Path::new("dummy").to_path_buf()));
+                assert_eq!(offset, Some(64));
+                assert_eq!(reason, "object header truncated");
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compression_flags_accept_single_algorithm_and_reject_conflicts() {
+        assert_eq!(compression_from_object_flags(0).unwrap(), None);
+        assert_eq!(
+            compression_from_object_flags(OBJECT_COMPRESSED_LZ4).unwrap(),
+            Some(CompressionAlgo::Lz4)
+        );
+        assert_eq!(
+            compression_from_object_flags(OBJECT_COMPRESSED_XZ).unwrap(),
+            Some(CompressionAlgo::Xz)
+        );
+        assert_eq!(
+            compression_from_object_flags(OBJECT_COMPRESSED_ZSTD).unwrap(),
+            Some(CompressionAlgo::Zstd)
+        );
+
+        match compression_from_object_flags(OBJECT_COMPRESSED_LZ4 | OBJECT_COMPRESSED_ZSTD) {
+            Err(SdJournalError::Corrupt { reason, .. }) => {
+                assert_eq!(reason, "multiple compression flags set");
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
 
     #[test]
     fn compact_entry_items_offsets_only() {
@@ -390,5 +499,30 @@ mod tests {
         let got = parse_entry_data_offsets_bytes(&items, false, 1024, Path::new("dummy"), 0)
             .expect("parse regular entry items");
         assert_eq!(got, vec![0x1111_2222_3333_4444]);
+    }
+
+    #[test]
+    fn entry_items_reject_misalignment_and_field_limit() {
+        match parse_entry_data_offsets_bytes(&[1, 2, 3], true, 1024, Path::new("dummy"), 9) {
+            Err(SdJournalError::Corrupt { reason, offset, .. }) => {
+                assert_eq!(offset, Some(9));
+                assert_eq!(reason, "ENTRY compact items not aligned");
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+
+        let mut regular = Vec::new();
+        regular.extend_from_slice(&100u64.to_le_bytes());
+        regular.extend_from_slice(&0u64.to_le_bytes());
+        regular.extend_from_slice(&200u64.to_le_bytes());
+        regular.extend_from_slice(&0u64.to_le_bytes());
+
+        match parse_entry_data_offsets_bytes(&regular, false, 1, Path::new("dummy"), 0) {
+            Err(SdJournalError::LimitExceeded { kind, limit }) => {
+                assert_eq!(kind, LimitKind::FieldsPerEntry);
+                assert_eq!(limit, 1);
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
     }
 }

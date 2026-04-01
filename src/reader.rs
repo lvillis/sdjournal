@@ -197,3 +197,92 @@ fn read_exact_at(file: &File, offset: u64, buf: &mut [u8]) -> std::io::Result<()
     f.seek(SeekFrom::Start(offset))?;
     f.read_exact(buf)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write as _;
+    use tempfile::tempdir;
+
+    fn temp_file(bytes: &[u8]) -> (tempfile::TempDir, PathBuf, Arc<File>) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("reader.bin");
+        {
+            let mut file = File::create(&path).unwrap();
+            file.write_all(bytes).unwrap();
+            file.sync_all().unwrap();
+        }
+        let file = Arc::new(File::open(&path).unwrap());
+        (dir, path, file)
+    }
+
+    #[test]
+    fn bytebuf_from_vec_exposes_original_bytes() {
+        let buf = ByteBuf::from_vec(vec![1, 2, 3, 4]);
+        assert_eq!(buf.as_slice(), &[1, 2, 3, 4]);
+        assert_eq!(buf.as_ref(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn file_access_reads_ranges_and_rejects_beyond_eof() {
+        let (_dir, path, file) = temp_file(b"abcdef");
+        let access = FileAccess::new(path.clone(), file);
+
+        assert_eq!(access.len().unwrap(), 6);
+        assert_eq!(access.read(1, 3).unwrap().as_slice(), b"bcd");
+
+        match access.read(4, 3) {
+            Err(SdJournalError::Transient {
+                path: err_path,
+                reason,
+            }) => {
+                assert_eq!(err_path, Some(path));
+                assert_eq!(reason, "read beyond end of file (file_len=6, end=7)");
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn mmap_access_reads_ranges_and_rejects_beyond_eof() {
+        let (_dir, path, file) = temp_file(b"abcdef");
+        // SAFETY: The file is opened read-only for the duration of the test and is not mutated.
+        let map = Arc::new(unsafe { memmap2::MmapOptions::new().map(file.as_ref()).unwrap() });
+        let access = MmapAccess::new(path.clone(), file, map);
+
+        assert_eq!(access.read(2, 2).unwrap().as_slice(), b"cd");
+
+        match access.read(5, 2) {
+            Err(SdJournalError::Transient {
+                path: err_path,
+                reason,
+            }) => {
+                assert_eq!(err_path, Some(path));
+                assert_eq!(reason, "mmap read beyond end of file (file_len=6, end=7)");
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn bytebuf_from_mmap_rejects_out_of_bounds_range() {
+        let (_dir, path, file) = temp_file(b"abcdef");
+        // SAFETY: The file is opened read-only for the duration of the test and is not mutated.
+        let map = Arc::new(unsafe { memmap2::MmapOptions::new().map(file.as_ref()).unwrap() });
+
+        match ByteBuf::from_mmap(map, 2..99, &path) {
+            Err(SdJournalError::Corrupt {
+                path: err_path,
+                offset,
+                reason,
+            }) => {
+                assert_eq!(err_path, Some(path));
+                assert_eq!(offset, None);
+                assert_eq!(reason, "mmap range out of bounds");
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+}
