@@ -1,8 +1,17 @@
+## [0.1.12] - 2026-04-02
+
+### 🐛 Bug Fixes
+
+- Ci
 ## [0.1.11] - 2026-04-02
 
 ### 🐛 Bug Fixes
 
 - Ci
+
+### ⚙️ Miscellaneous Tasks
+
+- *(release)* 0.1.11
 ## [0.1.10] - 2026-04-02
 
 ### ⚙️ Miscellaneous Tasks
