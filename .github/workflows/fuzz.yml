@@ -33,15 +33,18 @@ jobs:
         with:
           components: llvm-tools-preview
 
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fuzz-nightly-ubuntu-24.04
+          workspaces: |
+            . -> target
+            fuzz -> target
+
       - name: Install cargo-fuzz
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
-
-      - name: Restore Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: fuzz-nightly
 
       - name: Run fuzz target (short)
         run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60

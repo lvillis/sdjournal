@@ -1,4 +1,8 @@
-use crate::error::{CompressionAlgo, LimitKind, Result, SdJournalError};
+use crate::error::{Result, SdJournalError};
+
+#[cfg(any(feature = "lz4", feature = "zstd", feature = "xz"))]
+use crate::error::{CompressionAlgo, LimitKind};
+#[cfg(feature = "lz4")]
 use crate::util::read_u64_le;
 
 #[cfg(feature = "lz4")]
@@ -119,6 +123,7 @@ pub(super) fn decompress_xz(_src: &[u8], _max: usize) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(feature = "lz4", feature = "zstd", feature = "xz"))]
     use super::*;
 
     #[cfg(feature = "lz4")]

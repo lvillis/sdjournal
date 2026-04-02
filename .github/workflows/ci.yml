@@ -30,15 +30,18 @@ jobs:
           toolchain: 1.94.1
           components: rustfmt, clippy
 
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-1.94.1-ubuntu-24.04
+          workspaces: |
+            . -> target
+            fuzz -> target
+
       - name: Install CI tools
         uses: taiki-e/install-action@v2
         with:
           tool: just,cargo-nextest
-
-      - name: Restore Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-1.94.1
 
       - name: Print systemd version
         run: systemd --version
@@ -61,7 +64,10 @@ jobs:
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-1.94.1
+          shared-key: ci-1.94.1-ubuntu-24.04
+          workspaces: |
+            . -> target
+            fuzz -> target
 
       - name: cargo clippy (no default features)
         run: cargo clippy --all-targets --no-default-features -- -D warnings
@@ -100,13 +106,14 @@ jobs:
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-1.94.1
+          shared-key: ci-1.94.1-${{ matrix.os }}
+          workspaces: |
+            . -> target
+            fuzz -> target
 
       - name: Print systemd version
         run: systemd --version
 
       - name: cargo test (golden strict)
-        env:
-          CARGO_TARGET_DIR: /tmp/sdjournal-target
         run: |
           cargo test --all-features --test golden_journalctl
