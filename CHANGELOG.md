@@ -1,3 +1,13 @@
+## [0.1.9] - 2026-04-02
+
+### ⚙️ Miscellaneous Tasks
+
+- *(docs)* Complete rustdoc coverage for public API
+## [0.1.8] - 2026-04-01
+
+### ⚙️ Miscellaneous Tasks
+
+- *(release)* 0.1.8
 ## [0.1.7] - 2026-04-01
 
 ### 🚜 Refactor
