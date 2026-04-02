@@ -1,8 +1,14 @@
+## [0.1.11] - 2026-04-02
+
+### 🐛 Bug Fixes
+
+- Ci
 ## [0.1.10] - 2026-04-02
 
 ### ⚙️ Miscellaneous Tasks
 
 - Add justfile
+- *(release)* 0.1.10
 ## [0.1.9] - 2026-04-02
 
 ### ⚙️ Miscellaneous Tasks
