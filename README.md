@@ -1,19 +1,28 @@
 # sdjournal
 
+[![crates.io](https://img.shields.io/crates/v/sdjournal.svg)](https://crates.io/crates/sdjournal)
+[![docs.rs](https://img.shields.io/docsrs/sdjournal)](https://docs.rs/sdjournal)
+
 `sdjournal` is a **pure Rust** systemd journal reader and query engine. It reads `*.journal` files directly and does **not** depend on `libsystemd` or invoke `journalctl` (tests may use `journalctl` for golden comparisons).
 
-## Status
+## Overview
 
-- Target OS: **Linux** (non-Linux builds are supported for compilation, but `Journal::open_default()` is Linux-only).
-- Designed for production use: corruption-/truncate-resistant parsing, bounded resource usage, stable merge ordering, cursor checkpoints, follow/tail with rotate support.
+- Pure Rust, with no `libsystemd` dependency
+- Bounded, corruption-resistant parsing for production use
+- Stable merge ordering, cursor checkpoints, and follow/tail support
+- Optional mmap, compression backends, tracing, Tokio follow, and FSS verification
 
-## Supported systemd / sample matrix
+## Compatibility
 
-This project is validated in CI on:
-- **Ubuntu 22.04** (systemd 249.x) as the **minimum** tested version
-- **Ubuntu 24.04** (systemd 255.x) as the **target** tested version
+- Target OS: **Linux**
+- Non-Linux builds compile, but `Journal::open_default()` is Linux-only
+- CI coverage includes Ubuntu 22.04 (systemd 249.x) and Ubuntu 24.04 (systemd 255.x)
 
-See `.github/workflows/ci.yml` for the exact matrix and the logged `systemd --version` output.
+## Install
+
+```bash
+cargo add sdjournal
+```
 
 ## Features
 
@@ -43,7 +52,7 @@ for item in q.iter()? {
 # Ok::<(), sdjournal::SdJournalError>(())
 ```
 
-## Cursor checkpoint (resume after restart)
+## Resume From Cursor
 
 An end-to-end example that persists the last cursor and resumes via `after_cursor` is in:
 - `examples/checkpoint_follow.rs`
@@ -56,7 +65,7 @@ cargo run --example checkpoint_follow -- sshd.service /var/tmp/sdjournal.cursor
 
 ## Start Here
 
-If you want to understand the crate quickly, read or run these examples in order:
+To understand the crate quickly, read or run these examples in order:
 - `tour`: guided walkthrough of `Journal`, `JournalQuery`, `EntryRef`/`EntryOwned`, `Cursor`, and `Follow`
 - `tail`: the smallest “open default journal and read entries” path
 - `match_unit`: the most common production filter shape
@@ -89,10 +98,3 @@ Streaming / integration:
 - `follow_unit`: block and print a few newly appended entries
 - `follow_tokio`: use the Tokio follow adapter (`--features tokio`)
 - `verify_seal`: verify FSS tags (`--features verify-seal`)
-
-## Development
-
-- Format: `cargo fmt`
-- Lint: `cargo clippy --all-targets --all-features -- -D warnings`
-- Test: `cargo test --all-features`
-- Fuzz (nightly): `cargo +nightly fuzz run journal_open`
