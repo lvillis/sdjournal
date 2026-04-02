@@ -64,19 +64,19 @@ jobs:
           shared-key: ci-1.94.1
 
       - name: cargo clippy (no default features)
-        run: cargo clippy --all-targets --no-default-features --locked -- -D warnings
+        run: cargo clippy --all-targets --no-default-features -- -D warnings
 
       - name: cargo test (no default features, lib)
-        run: cargo test --lib --no-default-features --locked
+        run: cargo test --lib --no-default-features
 
       - name: cargo check (no default features + tokio)
-        run: cargo check --no-default-features --features tokio --locked
+        run: cargo check --no-default-features --features tokio
 
       - name: cargo check (no default features + verify-seal)
-        run: cargo check --no-default-features --features verify-seal --locked
+        run: cargo check --no-default-features --features verify-seal
 
       - name: cargo check (fuzz harnesses)
-        run: cargo check --manifest-path fuzz/Cargo.toml --locked
+        run: cargo check --manifest-path fuzz/Cargo.toml
 
   golden:
     name: golden (${{ matrix.os }})
@@ -109,4 +109,4 @@ jobs:
         env:
           CARGO_TARGET_DIR: /tmp/sdjournal-target
         run: |
-          cargo test --all-features --locked --test golden_journalctl
+          cargo test --all-features --test golden_journalctl
