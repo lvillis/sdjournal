@@ -68,6 +68,10 @@ impl SystemdCursor {
 }
 
 /// Opaque cursor for checkpointing and resuming journal iteration.
+///
+/// A cursor can be round-tripped through [`std::string::ToString::to_string`] and
+/// [`Cursor::parse`]. The textual representation is stable for `sdjournal`-generated cursors and
+/// also accepts native systemd cursor strings for resume interoperability.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Cursor {
     kind: CursorKind,
@@ -117,8 +121,11 @@ impl Cursor {
 
     /// Parse a cursor from a string.
     ///
-    /// This accepts both the `sdjournal` versioned format (`SJ1:...`) and systemd cursor strings
-    /// (best-effort).
+    /// This accepts both the `sdjournal` versioned format (`SJ1:...`) and native systemd cursor
+    /// strings.
+    ///
+    /// The returned cursor can be passed to [`crate::Journal::seek_cursor`] or
+    /// [`crate::JournalQuery::after_cursor`].
     pub fn parse(s: &str) -> Result<Self> {
         let s = s.trim();
         if let Some(rest) = s.strip_prefix(PREFIX_V1) {

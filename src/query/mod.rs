@@ -22,7 +22,15 @@ enum MatchTerm {
     },
 }
 
-/// A query builder for reading entries from a `Journal`.
+/// A query builder for reading entries from a [`Journal`].
+///
+/// `JournalQuery` is mutable and chainable: each builder method updates the query in place and
+/// returns `&mut Self`.
+///
+/// Validation for field names and query-term limits is intentionally deferred. Builder methods
+/// record validation failures internally, and terminal methods such as [`JournalQuery::iter`],
+/// [`JournalQuery::collect_owned`], and [`JournalQuery::follow`] surface them as
+/// [`SdJournalError`] values.
 #[derive(Clone)]
 pub struct JournalQuery {
     journal: Journal,
@@ -55,6 +63,9 @@ impl JournalQuery {
         }
     }
 
+    /// Match entries whose field equals `value` byte-for-byte.
+    ///
+    /// Field-name validation is deferred until a terminal method is called.
     pub fn match_exact(&mut self, field: &str, value: &[u8]) -> &mut Self {
         if self.invalid_reason.is_some() {
             return self;
@@ -82,6 +93,9 @@ impl JournalQuery {
         self
     }
 
+    /// Match entries that contain `field`, regardless of its value.
+    ///
+    /// Field-name validation is deferred until a terminal method is called.
     pub fn match_present(&mut self, field: &str) -> &mut Self {
         if self.invalid_reason.is_some() {
             return self;
@@ -111,7 +125,7 @@ impl JournalQuery {
         self.match_unit_bytes(unit.as_bytes())
     }
 
-    /// Same as [`JournalQuery::match_unit`], but accepts the unit name as bytes.
+    /// Same as [`JournalQuery::match_unit`], but accepts the unit name as raw bytes.
     pub fn match_unit_bytes(&mut self, unit: &[u8]) -> &mut Self {
         if self.invalid_reason.is_some() {
             return self;
@@ -176,6 +190,14 @@ impl JournalQuery {
         self
     }
 
+    /// Add an OR-group to the query.
+    ///
+    /// Terms added inside the closure are OR-ed together, then AND-ed with the rest of the query.
+    /// Empty groups are ignored.
+    ///
+    /// This is useful for queries such as:
+    ///
+    /// `(_PID=1 OR _UID=0) AND _SYSTEMD_UNIT=sshd.service`
     pub fn or_group<F>(&mut self, f: F) -> &mut Self
     where
         F: FnOnce(&mut OrGroupBuilder),
@@ -211,16 +233,21 @@ impl JournalQuery {
         self
     }
 
+    /// Set an inclusive lower realtime bound in microseconds since the Unix epoch.
     pub fn since_realtime(&mut self, usec: u64) -> &mut Self {
         self.since_realtime = Some(usec);
         self
     }
 
+    /// Set an inclusive upper realtime bound in microseconds since the Unix epoch.
     pub fn until_realtime(&mut self, usec: u64) -> &mut Self {
         self.until_realtime = Some(usec);
         self
     }
 
+    /// Resume strictly after `cursor`.
+    ///
+    /// Unlike [`Journal::seek_cursor`], this excludes the entry identified by `cursor`.
     pub fn after_cursor(&mut self, cursor: Cursor) -> &mut Self {
         self.cursor_start = Some((cursor, false));
         self
@@ -244,21 +271,35 @@ impl JournalQuery {
         self
     }
 
+    /// Control whether results are returned newest-first instead of oldest-first.
+    ///
+    /// `false` is the default.
     pub fn reverse(&mut self, reverse: bool) -> &mut Self {
         self.reverse = reverse;
         self
     }
 
+    /// Limit the number of returned entries.
+    ///
+    /// Passing `0` produces an empty iterator.
     pub fn limit(&mut self, n: usize) -> &mut Self {
         self.limit = Some(n);
         self
     }
 
+    /// Validate the query and create a streaming iterator of matching entries.
+    ///
+    /// The iterator yields [`EntryRef`] values, which borrow or share underlying journal storage
+    /// when possible.
     pub fn iter(&self) -> Result<impl Iterator<Item = Result<EntryRef>> + use<>> {
         self.validate()?;
         JournalIter::new(self.clone())
     }
 
+    /// Collect all matching entries into owned values.
+    ///
+    /// This is a convenience wrapper around [`JournalQuery::iter`] plus
+    /// [`EntryRef::to_owned`](crate::EntryRef::to_owned).
     pub fn collect_owned(&self) -> Result<Vec<EntryOwned>> {
         let mut out = Vec::new();
         for item in self.iter()? {
@@ -268,6 +309,15 @@ impl JournalQuery {
         Ok(out)
     }
 
+    /// Create a blocking follow iterator.
+    ///
+    /// `follow()` first drains any matching backlog, then reopens the journal roots and waits for
+    /// newly appended matching entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdJournalError::InvalidQuery`] if the query uses unsupported follow-only states,
+    /// such as `reverse=true` or `until_realtime`.
     pub fn follow(&self) -> Result<Follow> {
         self.validate()?;
         self.validate_follow()?;
@@ -313,6 +363,9 @@ impl JournalQuery {
     }
 
     /// Create an async follow adapter for Tokio.
+    ///
+    /// This spawns a background thread that drives [`JournalQuery::follow`] and forwards owned
+    /// entries through a Tokio channel.
     #[cfg(feature = "tokio")]
     pub fn follow_tokio(&self) -> Result<crate::follow::TokioFollow> {
         Ok(crate::follow::TokioFollow::spawn(self.follow()?))
@@ -376,6 +429,9 @@ impl JournalQuery {
     }
 }
 
+/// Builder used inside [`JournalQuery::or_group`].
+///
+/// This type is usually used only from the closure passed to [`JournalQuery::or_group`].
 pub struct OrGroupBuilder {
     terms: Vec<MatchTerm>,
     config: crate::config::JournalConfig,
@@ -385,6 +441,7 @@ pub struct OrGroupBuilder {
 }
 
 impl OrGroupBuilder {
+    /// Add an exact field match to this OR-group.
     pub fn match_exact(&mut self, field: &str, value: &[u8]) -> &mut Self {
         if self.invalid_reason.is_some() {
             return self;
@@ -411,6 +468,7 @@ impl OrGroupBuilder {
         self
     }
 
+    /// Add a field-presence match to this OR-group.
     pub fn match_present(&mut self, field: &str) -> &mut Self {
         if self.invalid_reason.is_some() {
             return self;

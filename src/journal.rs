@@ -11,6 +11,9 @@ use std::sync::Arc;
 #[cfg(feature = "tracing")]
 use tracing::{debug, warn};
 
+/// An opened set of journal files.
+///
+/// Cloning a `Journal` is cheap; the underlying journal-file set is reference counted.
 #[derive(Clone)]
 pub struct Journal {
     pub(crate) inner: Arc<JournalInner>,
@@ -23,10 +26,19 @@ pub(crate) struct JournalInner {
 }
 
 impl Journal {
+    /// Open the default system journal roots on Linux.
+    ///
+    /// This scans `/run/log/journal` and `/var/log/journal`, opens any discovered journal files,
+    /// and deduplicates them by journal file ID.
+    ///
+    /// On non-Linux targets this returns [`SdJournalError::Unsupported`].
     pub fn open_default() -> Result<Self> {
         Self::open_default_with_config(JournalConfig::default())
     }
 
+    /// Open the default system journal roots with a custom [`JournalConfig`].
+    ///
+    /// See [`Journal::open_default`] for the scanned locations and platform behavior.
     pub fn open_default_with_config(config: JournalConfig) -> Result<Self> {
         #[cfg(target_os = "linux")]
         {
@@ -46,19 +58,39 @@ impl Journal {
         }
     }
 
+    /// Open journal files discovered under a single root directory.
+    ///
+    /// Discovery includes `*.journal` files in the directory itself and in immediate machine-ID
+    /// subdirectories such as `/var/log/journal/<machine-id>/`.
     pub fn open_dir(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_dir_with_config(path, JournalConfig::default())
     }
 
+    /// Open journal files discovered under a single root directory with a custom configuration.
     pub fn open_dir_with_config(path: impl AsRef<Path>, config: JournalConfig) -> Result<Self> {
         let paths = vec![path.as_ref().to_path_buf()];
         Self::open_dirs_with_config(&paths, config)
     }
 
+    /// Open journal files discovered under multiple root directories.
+    ///
+    /// Roots are sorted and deduplicated before discovery.
     pub fn open_dirs(paths: &[PathBuf]) -> Result<Self> {
         Self::open_dirs_with_config(paths, JournalConfig::default())
     }
 
+    /// Open journal files discovered under multiple root directories using a custom configuration.
+    ///
+    /// Discovery skips symlinks, only keeps files with supported journal extensions, and
+    /// deduplicates opened files by journal file ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`SdJournalError::InvalidQuery`] when `paths` is empty.
+    /// - [`SdJournalError::NotFound`] when no usable journal files are found.
+    /// - [`SdJournalError::LimitExceeded`] when discovery exceeds configured file limits.
+    /// - An underlying file or parse error when all candidates fail to open.
     pub fn open_dirs_with_config(paths: &[PathBuf], config: JournalConfig) -> Result<Self> {
         if paths.is_empty() {
             return Err(SdJournalError::InvalidQuery {
@@ -135,10 +167,14 @@ impl Journal {
         })
     }
 
+    /// Start building a query over the currently opened journal files.
     pub fn query(&self) -> JournalQuery {
         JournalQuery::new(self.clone())
     }
 
+    /// Create a query positioned at `cursor`, inclusive.
+    ///
+    /// This is a convenience wrapper around [`Journal::query`] plus cursor positioning.
     pub fn seek_cursor(&self, cursor: &Cursor) -> Result<JournalQuery> {
         let mut q = self.query();
         q.set_cursor_start(cursor.clone(), true)?;
@@ -146,6 +182,9 @@ impl Journal {
     }
 
     /// Verify Forward Secure Sealing (TAG objects) for all opened journal files.
+    ///
+    /// This validates TAG objects against a systemd verification key and returns an error if any
+    /// opened file is sealed but fails verification.
     ///
     /// This is available when the `verify-seal` feature is enabled.
     #[cfg(feature = "verify-seal")]

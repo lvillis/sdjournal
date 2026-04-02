@@ -8,8 +8,11 @@ pub type Result<T> = std::result::Result<T, SdJournalError>;
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompressionAlgo {
+    /// XZ-compressed payloads.
     Xz,
+    /// LZ4-compressed payloads.
     Lz4,
+    /// Zstandard-compressed payloads.
     Zstd,
 }
 
@@ -27,12 +30,19 @@ impl fmt::Display for CompressionAlgo {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LimitKind {
+    /// Maximum decoded object size accepted from the journal file.
     ObjectSizeBytes,
+    /// Maximum number of bytes accepted after decompressing a DATA payload.
     DecompressedBytes,
+    /// Maximum accepted field-name length.
     FieldNameLen,
+    /// Maximum number of fields accepted in a single entry.
     FieldsPerEntry,
+    /// Maximum traversal length for linked object chains.
     ObjectChainSteps,
+    /// Maximum number of journal files accepted from discovery.
     JournalFiles,
+    /// Maximum number of query terms accepted in a single query.
     QueryTerms,
 }
 
@@ -54,37 +64,61 @@ impl fmt::Display for LimitKind {
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum SdJournalError {
+    /// An operating-system or filesystem I/O failure.
     Io {
+        /// Short operation name such as `open`, `read_dir`, or `mmap`.
         op: &'static str,
+        /// Path associated with the operation, when available.
         path: Option<PathBuf>,
+        /// Underlying I/O error reported by the OS.
         source: std::io::Error,
     },
+    /// The process lacks permission to open a journal file.
     PermissionDenied {
+        /// Journal path that failed to open.
         path: PathBuf,
     },
+    /// The caller supplied an invalid query, cursor, or verification key.
     InvalidQuery {
+        /// Human-readable validation failure.
         reason: String,
     },
+    /// The journal file or requested operation uses an unsupported capability.
     Unsupported {
+        /// Human-readable reason for the unsupported case.
         reason: String,
     },
+    /// The journal file is malformed, truncated, or internally inconsistent.
     Corrupt {
+        /// Path to the offending journal file, when known.
         path: Option<PathBuf>,
+        /// Offset associated with the corruption, when known.
         offset: Option<u64>,
+        /// Human-readable corruption detail.
         reason: String,
     },
+    /// The journal appears to be in a temporary state, such as concurrent truncation or growth.
     Transient {
+        /// Path to the affected journal file, when known.
         path: Option<PathBuf>,
+        /// Human-readable description of the transient condition.
         reason: String,
     },
+    /// A compressed DATA payload could not be decoded.
     DecompressFailed {
+        /// Compression algorithm that was being decoded.
         algo: CompressionAlgo,
+        /// Decoder error detail.
         reason: String,
     },
+    /// A configured defensive limit was exceeded.
     LimitExceeded {
+        /// Which limit was exceeded.
         kind: LimitKind,
+        /// Configured limit value.
         limit: u64,
     },
+    /// No matching journal files or entries were found.
     NotFound,
 }
 

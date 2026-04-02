@@ -8,6 +8,9 @@ const DEFAULT_TOKIO_FOLLOW_BUFFER: usize = 1024;
 /// An async follow adapter for Tokio.
 ///
 /// This is available when the `tokio` feature is enabled.
+///
+/// Internally it spawns a blocking worker thread that drives [`Follow`] and forwards owned entries
+/// through a bounded Tokio channel.
 pub struct TokioFollow {
     rx: tokio::sync::mpsc::Receiver<Result<EntryOwned>>,
 }
@@ -37,11 +40,16 @@ impl TokioFollow {
     }
 
     /// Receive the next followed entry.
+    ///
+    /// Returns `None` once the background worker exits and the channel is closed.
     pub async fn next(&mut self) -> Option<Result<EntryOwned>> {
         self.rx.recv().await
     }
 
     /// Convert into the underlying Tokio receiver.
+    ///
+    /// This is useful when the caller wants to integrate follow output with `tokio::select!` or a
+    /// custom receive loop.
     pub fn into_receiver(self) -> tokio::sync::mpsc::Receiver<Result<EntryOwned>> {
         self.rx
     }

@@ -1,6 +1,9 @@
 use std::time::Duration;
 
-/// Runtime configuration for `Journal`.
+/// Runtime configuration for [`crate::Journal`].
+///
+/// These limits are primarily defensive: they bound memory use and traversal work when reading
+/// malformed, truncated, or unexpectedly large journal files.
 #[derive(Clone, Debug)]
 pub struct JournalConfig {
     /// Maximum object size accepted from the journal file.

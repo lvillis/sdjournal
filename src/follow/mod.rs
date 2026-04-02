@@ -32,6 +32,9 @@ enum FollowStage {
 ///
 /// The iterator first drains matching backlog entries, then reopens the journal set and polls
 /// for new entries while preserving the query template and last observed cursor.
+///
+/// Calling [`Iterator::next`] may block until either a new matching entry arrives or an
+/// unrecoverable error occurs.
 pub struct Follow {
     roots: Vec<PathBuf>,
     config: crate::config::JournalConfig,
