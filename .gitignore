@@ -1,84 +1,36 @@
-# Build
+# Rust
 /target
-*.exe
-*.dll
-*.so
-*.dylib
-*.a
-*.o
-*.d
-*.rlib
-*.rmeta
+**/*.rs.bk
 
-# Docs
-/target/doc
+# Internal/private directories (must never be published)
+/.cargo/
+/.docs/
 
-# Project docs
-docs/
+# Logs and temporary files
+/logs/
+*.log
+*.tmp
+*.temp
 
-# Cache
-.cargo/
-!.cargo/
-.cargo/*
-!.cargo/config.toml
-!.cargo/*.cmd
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+AGENTS.md
+.aiignore
+CONTEXT.md
 
-# Coverage
-coverage/
-*.profraw
-*.profdata
-*.gcno
-*.gcda
+# Editors and IDEs
+/.idea/
+/.vscode/
+*.swp
+*.swo
+*~
 
-# IDE
-.vscode/
-.idea/
-*.iml
-*.code-workspace
-
-# OS
+# OS-generated files
 .DS_Store
 Thumbs.db
 
-# Temp
-*.log
-*.tmp
-*.swp
-*.swo
-
-# Local databases
-*.db
-*.db-journal
-*.db-wal
-*.db-shm
-
-# WASM
-pkg/
-*.wasm
-
-# Node
-node_modules/
-
-# Library crates may ignore Cargo.lock
 Cargo.lock
-
-.aiignore
-CONTEXT.md
-.justfile
-
-dist/
-
-.bak/
-
-crates/aptower/logs/
-
-# proptest
-proptest-regressions/
-AGENTS.md
-
-# cargo-fuzz
-fuzz/artifacts/
-fuzz/corpus/
-fuzz/target/
-
 .codex
+/fuzz/target
