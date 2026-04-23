@@ -1,8 +1,18 @@
+## [0.1.14] - 2026-04-23
+
+### 🚀 Features
+
+- [**breaking**] Replace follow API with a shared live engine
+
+### 🐛 Bug Fixes
+
+- Ci
 ## [0.1.13] - 2026-04-02
 
 ### ⚙️ Miscellaneous Tasks
 
 - *(docs)* Update README.md
+- *(release)* 0.1.13
 ## [0.1.12] - 2026-04-02
 
 ### 🐛 Bug Fixes
