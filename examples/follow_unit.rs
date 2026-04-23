@@ -1,7 +1,8 @@
-//! Follow one unit and print a bounded number of new entries.
+//! Subscribe to one unit's live stream and print a bounded number of new entries.
 
 use sdjournal::Journal;
 use std::error::Error;
+use std::thread;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let unit = std::env::args()
@@ -14,12 +15,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         .unwrap_or(5usize);
 
     let journal = Journal::open_default()?;
-    let mut q = journal.query();
-    q.match_unit(&unit);
+    let mut live = journal.live()?;
+    let mut filter = live.filter();
+    filter.match_unit(&unit);
 
-    let mut follow = q.follow()?;
-    for item in (&mut follow).take(max_items) {
-        let entry = item?;
+    let subscription = live.subscribe(filter)?;
+    let _engine = thread::spawn(move || {
+        let _ = live.run();
+    });
+
+    for _ in 0..max_items {
+        let entry = subscription.recv()??;
         let msg = entry
             .get("MESSAGE")
             .map(|v| String::from_utf8_lossy(v).into_owned())

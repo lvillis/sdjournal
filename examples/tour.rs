@@ -7,7 +7,7 @@
 //! - `EntryRef` is the zero-copy result type
 //! - `EntryOwned` is the durable, owned form
 //! - `Cursor` lets you resume from a known position
-//! - `Follow` turns a query into a streaming tail
+//! - `LiveJournal` turns shared live tailing into subscriptions
 
 use sdjournal::{EntryOwned, EntryRef, Journal};
 use std::error::Error;
@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     print_section("Cursor Resume");
     show_cursor_resume(&journal, &args.unit)?;
 
-    print_section("Follow");
+    print_section("Live Tail");
     match args.follow_limit {
         Some(n) => follow_unit(&journal, &args.unit, n)?,
         None => println!(
@@ -175,13 +175,18 @@ fn show_cursor_resume(journal: &Journal, unit: &str) -> Result<(), Box<dyn Error
 }
 
 fn follow_unit(journal: &Journal, unit: &str, limit: usize) -> Result<(), Box<dyn Error>> {
-    let mut q = journal.query();
-    q.match_unit(unit);
-
     println!("following up to {limit} new entries for {unit}");
-    let mut follow = q.follow()?;
-    for item in (&mut follow).take(limit) {
-        print_borrowed_entry("follow", &item?);
+    let mut live = journal.live()?;
+    let mut filter = live.filter();
+    filter.match_unit(unit);
+    let subscription = live.subscribe(filter)?;
+    let _engine = std::thread::spawn(move || {
+        let _ = live.run();
+    });
+
+    for _ in 0..limit {
+        let entry = subscription.recv()??;
+        print_owned_entry("live", &entry);
     }
 
     Ok(())

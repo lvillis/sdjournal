@@ -14,18 +14,19 @@
 //! - `lz4` (default): enable LZ4-compressed DATA payload decoding.
 //! - `zstd` (default): enable Zstandard-compressed DATA payload decoding.
 //! - `xz`: enable XZ-compressed DATA payload decoding.
-//! - `tokio`: enable [`JournalQuery::follow_tokio`] and [`TokioFollow`].
+//! - `tokio`: enable [`LiveSubscription::into_tokio`] and [`TokioSubscription`].
 //! - `tracing`: emit diagnostics via the `tracing` ecosystem.
 //! - `verify-seal`: enable [`Journal::verify_seal`] for Forward Secure Sealing verification.
 //!
 //! # Main Types
 //!
 //! - [`Journal`] opens one or more journal roots and deduplicates journal files.
-//! - [`JournalQuery`] builds filters, time bounds, cursor resumes, and follow streams.
+//! - [`JournalQuery`] builds historical filters, time bounds, and cursor resumes.
 //! - [`EntryRef`] exposes zero-copy entry views when possible.
 //! - [`EntryOwned`] detaches an entry for storage, async use, or cross-thread transfer.
 //! - [`Cursor`] provides checkpoint and resume tokens.
-//! - [`Follow`] blocks while tailing new matching entries.
+//! - [`LiveJournal`] shares one live tail engine across multiple subscriptions.
+//! - [`LiveSubscription`] receives owned entries dispatched by the live engine.
 //!
 //! # Quick Start
 //!
@@ -54,9 +55,9 @@ mod cursor;
 mod entry;
 mod error;
 mod file;
-mod follow;
 mod format;
 mod journal;
+mod live;
 mod query;
 mod reader;
 #[cfg(feature = "verify-seal")]
@@ -67,8 +68,10 @@ pub use crate::config::JournalConfig;
 pub use crate::cursor::Cursor;
 pub use crate::entry::{EntryOwned, EntryRef};
 pub use crate::error::{Result, SdJournalError};
-pub use crate::follow::Follow;
-#[cfg(feature = "tokio")]
-pub use crate::follow::TokioFollow;
 pub use crate::journal::Journal;
+#[cfg(feature = "tokio")]
+pub use crate::live::TokioSubscription;
+pub use crate::live::{
+    LiveFilter, LiveJournal, LiveOrGroupBuilder, LiveSubscription, SubscriptionOptions,
+};
 pub use crate::query::JournalQuery;

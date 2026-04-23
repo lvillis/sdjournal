@@ -9,8 +9,8 @@
 
 - Pure Rust, with no `libsystemd` dependency
 - Bounded, corruption-resistant parsing for production use
-- Stable merge ordering, cursor checkpoints, and follow/tail support
-- Optional mmap, compression backends, tracing, Tokio follow, and FSS verification
+- Stable merge ordering, cursor checkpoints, and shared live subscriptions
+- Optional mmap, compression backends, tracing, Tokio integration, and FSS verification
 
 ## Compatibility
 
@@ -30,7 +30,7 @@ cargo add sdjournal
 - Optional:
   - `xz`: enable XZ decompression
   - `tracing`: emit diagnostics via `tracing` (caller installs a subscriber)
-  - `tokio`: provides an async follow adapter
+  - `tokio`: provides an async live-subscription adapter
   - `verify-seal`: verify Forward Secure Sealing (TAG/FSS) with a systemd verification key
 
 ## Quickstart
@@ -66,10 +66,10 @@ cargo run --example checkpoint_follow -- sshd.service /var/tmp/sdjournal.cursor
 ## Start Here
 
 To understand the crate quickly, read or run these examples in order:
-- `tour`: guided walkthrough of `Journal`, `JournalQuery`, `EntryRef`/`EntryOwned`, `Cursor`, and `Follow`
+- `tour`: guided walkthrough of `Journal`, `JournalQuery`, `EntryRef`/`EntryOwned`, `Cursor`, and `LiveJournal`
 - `tail`: the smallest “open default journal and read entries” path
 - `match_unit`: the most common production filter shape
-- `checkpoint_follow`: resume-safe follow loop for long-running consumers
+- `checkpoint_follow`: resume-safe live subscription for long-running consumers
 
 ## Examples
 
@@ -95,6 +95,7 @@ Cursor / resume:
 - `checkpoint_follow`: persist cursors while following
 
 Streaming / integration:
-- `follow_unit`: block and print a few newly appended entries
-- `follow_tokio`: use the Tokio follow adapter (`--features tokio`)
+- `follow_unit`: block and print a few newly appended entries from a live subscription
+- `live_multi_subscriptions`: share one `LiveJournal` across multiple unit subscriptions
+- `follow_tokio`: bridge a live subscription into Tokio (`--features tokio`)
 - `verify_seal`: verify FSS tags (`--features verify-seal`)

@@ -24,16 +24,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust (1.94.1)
+      - name: Install Rust (1.95.0)
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.94.1
+          toolchain: 1.95.0
           components: rustfmt, clippy
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-1.94.1-ubuntu-24.04
+          shared-key: ci-1.95.0-ubuntu-24.04
           workspaces: |
             . -> target
             fuzz -> target
@@ -55,16 +55,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust (1.94.1)
+      - name: Install Rust (1.95.0)
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.94.1
+          toolchain: 1.95.0
           components: rustfmt, clippy
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-1.94.1-ubuntu-24.04
+          shared-key: ci-1.95.0-ubuntu-24.04
           workspaces: |
             . -> target
             fuzz -> target
@@ -97,16 +97,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust (1.94.1)
+      - name: Install Rust (1.95.0)
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.94.1
+          toolchain: 1.95.0
           components: rustfmt, clippy
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-1.94.1-${{ matrix.os }}
+          shared-key: ci-1.95.0-${{ matrix.os }}
           workspaces: |
             . -> target
             fuzz -> target

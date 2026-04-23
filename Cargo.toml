@@ -8,7 +8,7 @@ repository = "https://github.com/lvillis/sdjournal"
 readme = "README.md"
 license = "MIT"
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.95"
 keywords = ["systemd", "journal", "journald", "logging", "linux"]
 categories = ["os::unix-apis", "parsing", "filesystem"]
 include = [
@@ -40,7 +40,7 @@ ruzstd = { version = "0.8.2", default-features = false, features = ["std"], opti
 xz2 = { version = "0.1.7", default-features = false, features = ["static"], optional = true }
 
 # Optional runtime integrations.
-tokio = { version = "1.50.0", default-features = false, features = ["sync"], optional = true }
+tokio = { version = "1.52.1", default-features = false, features = ["sync"], optional = true }
 tracing = { version = "0.1.44", default-features = false, features = ["std"], optional = true }
 
 # Optional FSS verification dependencies.
@@ -50,14 +50,18 @@ num-traits = { version = "0.2.19", default-features = false, features = ["std"],
 sha2 = { version = "0.11.0", default-features = false, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# Linux-only follow and polling support.
-inotify = { version = "0.11.1", default-features = false }
-libc = { version = "0.2.183", default-features = false }
+# Linux-only live tailing and polling support.
+rustix = { version = "1.1.4", default-features = false, features = ["event", "fs"] }
 
 [dev-dependencies]
 # Test utilities for golden and fixture assertions.
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support", "plotters", "rayon"] }
 serde_json = { version = "1.0.149", default-features = false, features = ["std"] }
 tempfile = { version = "3.27.0", default-features = false }
+
+[[bench]]
+name = "follow_perf"
+harness = false
 
 [package.metadata.release]
 allow-branch = ["main"]

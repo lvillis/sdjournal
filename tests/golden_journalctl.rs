@@ -5,7 +5,6 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -395,7 +394,6 @@ fn follow_tails_and_emits_new_entries() {
 
     let cfg = JournalConfig {
         poll_interval: Duration::from_millis(100),
-        max_follow_backoff: Duration::from_millis(500),
         ..Default::default()
     };
     let journal = match Journal::open_dirs_with_config(&dirs, cfg) {
@@ -418,24 +416,30 @@ fn follow_tails_and_emits_new_entries() {
     }
     thread::sleep(Duration::from_millis(100));
 
-    let mut q = journal.query();
-    q.match_exact("SYSLOG_IDENTIFIER", tag.as_bytes());
-    let follow = match q.follow() {
-        Ok(f) => f,
+    let mut live = match journal.live() {
+        Ok(live) => live,
         Err(e) => {
             if strict_mode() {
-                panic!("follow unsupported: {e}");
+                panic!("live engine unsupported: {e}");
             }
-            eprintln!("skipping: follow unsupported: {e}");
+            eprintln!("skipping: live engine unsupported: {e}");
             return;
         }
     };
-
-    let (tx, rx) = mpsc::channel();
+    let mut filter = live.filter();
+    filter.match_exact("SYSLOG_IDENTIFIER", tag.as_bytes());
+    let subscription = match live.subscribe(filter) {
+        Ok(subscription) => subscription,
+        Err(e) => {
+            if strict_mode() {
+                panic!("subscription unsupported: {e}");
+            }
+            eprintln!("skipping: subscription unsupported: {e}");
+            return;
+        }
+    };
     thread::spawn(move || {
-        let mut f = follow;
-        let item = f.next();
-        let _ = tx.send(item);
+        let _ = live.run();
     });
 
     thread::sleep(Duration::from_millis(200));
@@ -447,8 +451,10 @@ fn follow_tails_and_emits_new_entries() {
         return;
     }
 
-    let item = rx.recv_timeout(Duration::from_secs(10)).expect("timeout");
-    let entry = item.expect("missing follow item").expect("follow error");
+    let item = subscription
+        .recv_timeout(Duration::from_secs(10))
+        .expect("timeout");
+    let entry = item.expect("live delivery error");
     let got = entry
         .get("MESSAGE")
         .map(|b| String::from_utf8_lossy(b).into_owned())

@@ -14,7 +14,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         max_query_terms: 32,
         max_decompressed_bytes: 2 * 1024 * 1024,
         poll_interval: Duration::from_millis(500),
-        max_follow_backoff: Duration::from_secs(2),
         ..JournalConfig::default()
     };
 

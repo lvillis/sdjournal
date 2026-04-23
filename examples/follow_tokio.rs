@@ -1,8 +1,9 @@
-//! Follow one unit through the Tokio adapter.
+//! Bridge one live subscription into Tokio.
 
 #[cfg(feature = "tokio")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use sdjournal::Journal;
+    use std::thread;
 
     let unit = std::env::args()
         .nth(1)
@@ -14,16 +15,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(5usize);
 
     let journal = Journal::open_default()?;
-    let mut q = journal.query();
-    q.match_unit(&unit);
+    let mut live = journal.live()?;
+    let mut filter = live.filter();
+    filter.match_unit(&unit);
 
-    let follow = q.follow_tokio()?;
-    let mut rx = follow.into_receiver();
+    let subscription = live.subscribe(filter)?;
+    let _engine = thread::spawn(move || {
+        let _ = live.run();
+    });
+    let mut rx = subscription.into_tokio().into_receiver();
     for _ in 0..max_items {
         let item = rx.blocking_recv().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
-                "tokio follow channel closed",
+                "tokio live channel closed",
             )
         })?;
         let entry = item?;

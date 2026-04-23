@@ -4,7 +4,6 @@ mod execute;
 use crate::cursor::Cursor;
 use crate::entry::{EntryOwned, EntryRef};
 use crate::error::{LimitKind, Result, SdJournalError};
-use crate::follow::Follow;
 use crate::journal::Journal;
 use crate::util::is_ascii_field_name;
 
@@ -28,9 +27,8 @@ enum MatchTerm {
 /// returns `&mut Self`.
 ///
 /// Validation for field names and query-term limits is intentionally deferred. Builder methods
-/// record validation failures internally, and terminal methods such as [`JournalQuery::iter`],
-/// [`JournalQuery::collect_owned`], and [`JournalQuery::follow`] surface them as
-/// [`SdJournalError`] values.
+/// record validation failures internally, and terminal methods such as [`JournalQuery::iter`] and
+/// [`JournalQuery::collect_owned`] surface them as [`SdJournalError`] values.
 #[derive(Clone)]
 pub struct JournalQuery {
     journal: Journal,
@@ -309,77 +307,9 @@ impl JournalQuery {
         Ok(out)
     }
 
-    /// Create a blocking follow iterator.
-    ///
-    /// `follow()` first drains any matching backlog, then reopens the journal roots and waits for
-    /// newly appended matching entries.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SdJournalError::InvalidQuery`] if the query uses unsupported follow-only states,
-    /// such as `reverse=true` or `until_realtime`.
-    pub fn follow(&self) -> Result<Follow> {
-        self.validate()?;
-        self.validate_follow()?;
-
-        let roots = self.journal.inner.roots.clone();
-        let config = self.journal.inner.config.clone();
-
-        let live_journal = Journal::open_dirs_with_config(&roots, config.clone())?;
-        let mut template = self.with_journal(live_journal.clone());
-        template.limit = None;
-
-        let mut catchup_query = self.with_journal(live_journal);
-        let mut last_cursor: Option<Cursor> = None;
-
-        let has_lower_bound = self.cursor_start.is_some() || self.since_realtime.is_some();
-        if !has_lower_bound {
-            let mut tail_probe = template.clone();
-            tail_probe.reverse(true);
-            tail_probe.limit(1);
-
-            for item in tail_probe.iter()? {
-                match item {
-                    Ok(entry) => {
-                        let c = entry.cursor()?;
-                        catchup_query.set_cursor_start(c.clone(), false)?;
-                        last_cursor = Some(c);
-                        break;
-                    }
-                    Err(_) => continue,
-                }
-            }
-        }
-
-        let catchup_iter: Box<dyn Iterator<Item = Result<EntryRef>> + Send> =
-            Box::new(catchup_query.iter()?);
-        Ok(Follow::new(
-            roots,
-            config,
-            template,
-            catchup_iter,
-            last_cursor,
-        ))
-    }
-
-    /// Create an async follow adapter for Tokio.
-    ///
-    /// This spawns a background thread that drives [`JournalQuery::follow`] and forwards owned
-    /// entries through a Tokio channel.
-    #[cfg(feature = "tokio")]
-    pub fn follow_tokio(&self) -> Result<crate::follow::TokioFollow> {
-        Ok(crate::follow::TokioFollow::spawn(self.follow()?))
-    }
-
     pub(crate) fn set_cursor_start(&mut self, cursor: Cursor, inclusive: bool) -> Result<()> {
         self.cursor_start = Some((cursor, inclusive));
         Ok(())
-    }
-
-    pub(crate) fn with_journal(&self, journal: Journal) -> Self {
-        let mut q = self.clone();
-        q.journal = journal;
-        q
     }
 
     fn validate(&self) -> Result<()> {
@@ -405,21 +335,6 @@ impl JournalQuery {
 
         Ok(())
     }
-
-    fn validate_follow(&self) -> Result<()> {
-        if self.reverse {
-            return Err(SdJournalError::InvalidQuery {
-                reason: "follow() requires reverse=false".to_string(),
-            });
-        }
-        if self.until_realtime.is_some() {
-            return Err(SdJournalError::InvalidQuery {
-                reason: "follow() does not allow until_realtime".to_string(),
-            });
-        }
-        Ok(())
-    }
-
     fn count_terms(&self) -> usize {
         let mut n = self.global_terms.len();
         for g in &self.or_groups {
@@ -666,30 +581,6 @@ mod tests {
         q.until_realtime(10);
 
         match q.iter() {
-            Ok(_) => panic!("expected InvalidQuery"),
-            Err(err) => assert!(matches!(err, SdJournalError::InvalidQuery { .. })),
-        }
-    }
-
-    #[test]
-    fn follow_rejects_reverse_queries() {
-        let journal = empty_journal_with_config(JournalConfig::default());
-        let mut q = JournalQuery::new(journal);
-        q.reverse(true);
-
-        match q.follow() {
-            Ok(_) => panic!("expected InvalidQuery"),
-            Err(err) => assert!(matches!(err, SdJournalError::InvalidQuery { .. })),
-        }
-    }
-
-    #[test]
-    fn follow_rejects_until_realtime_queries() {
-        let journal = empty_journal_with_config(JournalConfig::default());
-        let mut q = JournalQuery::new(journal);
-        q.until_realtime(42);
-
-        match q.follow() {
             Ok(_) => panic!("expected InvalidQuery"),
             Err(err) => assert!(matches!(err, SdJournalError::InvalidQuery { .. })),
         }

@@ -2,6 +2,7 @@ use crate::config::JournalConfig;
 use crate::cursor::Cursor;
 use crate::error::{LimitKind, Result, SdJournalError};
 use crate::file::JournalFile;
+use crate::live::LiveJournal;
 use crate::query::JournalQuery;
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -40,21 +41,20 @@ impl Journal {
     ///
     /// See [`Journal::open_default`] for the scanned locations and platform behavior.
     pub fn open_default_with_config(config: JournalConfig) -> Result<Self> {
-        #[cfg(target_os = "linux")]
-        {
-            let paths = vec![
-                PathBuf::from("/run/log/journal"),
-                PathBuf::from("/var/log/journal"),
-            ];
-            Self::open_dirs_with_config(&paths, config)
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = config;
-            Err(SdJournalError::Unsupported {
-                reason: "Journal::open_default is only supported on Linux".to_string(),
-            })
+        core::cfg_select! {
+            target_os = "linux" => {
+                let paths = vec![
+                    PathBuf::from("/run/log/journal"),
+                    PathBuf::from("/var/log/journal"),
+                ];
+                Self::open_dirs_with_config(&paths, config)
+            }
+            _ => {
+                let _ = config;
+                Err(SdJournalError::Unsupported {
+                    reason: "Journal::open_default is only supported on Linux".to_string(),
+                })
+            }
         }
     }
 
@@ -170,6 +170,14 @@ impl Journal {
     /// Start building a query over the currently opened journal files.
     pub fn query(&self) -> JournalQuery {
         JournalQuery::new(self.clone())
+    }
+
+    /// Create a shared live engine from this journal set.
+    ///
+    /// The returned [`LiveJournal`] shares one watcher and one live cursor across all registered
+    /// subscriptions.
+    pub fn live(&self) -> Result<LiveJournal> {
+        LiveJournal::from_journal(self.clone())
     }
 
     /// Create a query positioned at `cursor`, inclusive.

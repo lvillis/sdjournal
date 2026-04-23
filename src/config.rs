@@ -33,9 +33,6 @@ pub struct JournalConfig {
     /// Whether to include `*.journal~` temporary/incomplete files during discovery.
     pub include_journal_tilde: bool,
 
-    /// Maximum follow retry backoff.
-    pub max_follow_backoff: Duration,
-
     /// Polling interval used as fallback when inotify is unavailable/unreliable.
     pub poll_interval: Duration,
 }
@@ -52,7 +49,6 @@ impl Default for JournalConfig {
             max_query_terms: 64,
             allow_mmap_online: false,
             include_journal_tilde: false,
-            max_follow_backoff: Duration::from_millis(2000),
             poll_interval: Duration::from_millis(2000),
         }
     }
@@ -75,7 +71,6 @@ mod tests {
         assert_eq!(cfg.max_query_terms, 64);
         assert!(!cfg.allow_mmap_online);
         assert!(!cfg.include_journal_tilde);
-        assert_eq!(cfg.max_follow_backoff, Duration::from_millis(2000));
         assert_eq!(cfg.poll_interval, Duration::from_millis(2000));
     }
 }

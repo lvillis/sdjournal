@@ -1,12 +1,13 @@
 //! Cursor checkpointing example.
 //!
-//! This tails a unit's logs and persists a cursor checkpoint to disk. On restart, it resumes
-//! strictly after the last persisted cursor.
+//! This subscribes to a unit's live stream and persists a cursor checkpoint to disk. On restart,
+//! it resumes strictly after the last persisted cursor.
 
 #[cfg(target_os = "linux")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use sdjournal::{Cursor, Journal};
+    use sdjournal::{Cursor, Journal, SubscriptionOptions};
     use std::path::PathBuf;
+    use std::thread;
 
     let mut args = std::env::args().skip(1);
     let unit = args.next().unwrap_or_else(|| "sshd.service".to_string());
@@ -28,15 +29,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let journal = Journal::open_default()?;
-    let mut q = journal.query();
-    q.match_exact("_SYSTEMD_UNIT", unit.as_bytes());
-    if let Some(c) = resume_cursor {
-        q.after_cursor(c);
+    let mut live = journal.live()?;
+    let mut filter = live.filter();
+    filter.match_exact("_SYSTEMD_UNIT", unit.as_bytes());
+    let mut options = SubscriptionOptions::new(filter);
+    if let Some(cursor) = resume_cursor {
+        options.after_cursor(cursor);
     }
 
-    let mut follow = q.follow()?;
-    for item in &mut follow {
-        let entry = item?;
+    let subscription = live.subscribe_with_options(options)?;
+    let _engine = thread::spawn(move || {
+        let _ = live.run();
+    });
+
+    loop {
+        let entry = subscription.recv()??;
         if let Some(msg) = entry.get("MESSAGE") {
             println!("{}", String::from_utf8_lossy(msg));
         }
@@ -46,8 +53,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::write(&tmp, &cursor)?;
         std::fs::rename(&tmp, &checkpoint_path)?;
     }
-
-    Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
