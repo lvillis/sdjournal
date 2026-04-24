@@ -10,7 +10,7 @@ use crate::format::{Header, STATE_ARCHIVED};
 use crate::format::{STATE_OFFLINE, STATE_ONLINE};
 #[cfg(feature = "mmap")]
 use crate::reader::MmapAccess;
-use crate::reader::{ByteBuf, FileAccess, RandomAccess};
+use crate::reader::{ByteBuf, FileAccess};
 use crate::util::checked_add_u64;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -25,6 +25,14 @@ pub(crate) use self::iter::{DataEntryOffsetIter, EntryCursorFields, EntryMeta, F
 #[derive(Clone)]
 pub(crate) struct JournalFile {
     inner: Arc<JournalFileInner>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LiveFileState {
+    pub(crate) used_size: u64,
+    pub(crate) n_entries: u64,
+    pub(crate) entry_array_offset: u64,
+    pub(crate) tail_object_offset: u64,
 }
 
 struct JournalFileInner {
@@ -52,6 +60,18 @@ impl JournalFile {
             }
         })?);
 
+        Self::open_from_file(path, file, config)
+    }
+
+    pub(crate) fn refresh_from_current_handle(&self) -> Result<Self> {
+        Self::open_from_file(
+            self.inner.path.clone(),
+            self.current_file()?,
+            &self.inner.config,
+        )
+    }
+
+    fn open_from_file(path: PathBuf, file: Arc<File>, config: &JournalConfig) -> Result<Self> {
         let file_len = file
             .metadata()
             .map_err(|e| SdJournalError::io("metadata", Some(path.clone()), e))?
@@ -59,7 +79,7 @@ impl JournalFile {
 
         let file_access = FileAccess::new(path.clone(), file.clone());
         let header_len = usize::try_from(file_len).unwrap_or(usize::MAX).min(272);
-        let header_buf = file_access.read(0, header_len)?;
+        let header_buf = file_access.read_known_valid(0, header_len)?;
         let header = Header::parse(header_buf.as_slice(), &path)?;
         let used_size = checked_add_u64(
             header.header_size,
@@ -146,6 +166,19 @@ impl JournalFile {
         self.inner.header.seqnum_id
     }
 
+    pub(crate) fn live_state(&self) -> LiveFileState {
+        LiveFileState {
+            used_size: self.inner.used_size,
+            n_entries: self.inner.header.n_entries,
+            entry_array_offset: self.inner.header.entry_array_offset,
+            tail_object_offset: self.inner.header.tail_object_offset,
+        }
+    }
+
+    pub(crate) fn max_object_chain_steps(&self) -> usize {
+        self.inner.config.max_object_chain_steps
+    }
+
     #[cfg(feature = "verify-seal")]
     pub(crate) fn header(&self) -> &Header {
         &self.inner.header
@@ -192,24 +225,9 @@ impl JournalFile {
             .clone();
 
         match access {
-            Access::File(access) => access.read(offset, len),
+            Access::File(access) => access.read_known_valid(offset, len),
             #[cfg(feature = "mmap")]
-            Access::Mmap(access) => match access.read(offset, len) {
-                Ok(buf) => Ok(buf),
-                Err(SdJournalError::Transient { .. }) => {
-                    let file_access = FileAccess::new(self.inner.path.clone(), access.file());
-                    {
-                        let mut g = self.inner.access.lock().map_err(|_| SdJournalError::Io {
-                            op: "lock",
-                            path: Some(self.inner.path.clone()),
-                            source: std::io::Error::other("poisoned lock"),
-                        })?;
-                        *g = Access::File(file_access.clone());
-                    }
-                    file_access.read(offset, len)
-                }
-                Err(e) => Err(e),
-            },
+            Access::Mmap(access) => access.read_known_valid(offset, len),
         }
     }
 
@@ -221,5 +239,24 @@ impl JournalFile {
         })?;
         crate::util::ensure_limit_usize(LimitKind::ObjectSizeBytes, max, size_usize)?;
         self.read_bytes(offset, size_usize)
+    }
+
+    fn current_file(&self) -> Result<Arc<File>> {
+        let access = self
+            .inner
+            .access
+            .lock()
+            .map_err(|_| SdJournalError::Io {
+                op: "lock",
+                path: Some(self.inner.path.clone()),
+                source: std::io::Error::other("poisoned lock"),
+            })?
+            .clone();
+
+        Ok(match access {
+            Access::File(access) => access.file(),
+            #[cfg(feature = "mmap")]
+            Access::Mmap(access) => access.file(),
+        })
     }
 }

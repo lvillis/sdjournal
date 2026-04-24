@@ -1,6 +1,8 @@
 use crate::cursor::Cursor;
 use crate::error::Result;
 use crate::reader::ByteBuf;
+use std::ops::Deref;
+use std::sync::Arc;
 
 /// An owned journal entry, suitable for caching, cross-thread use, or async contexts.
 #[derive(Debug, Clone)]
@@ -12,6 +14,38 @@ pub struct EntryOwned {
     monotonic_usec: u64,
     boot_id: [u8; 16],
     fields_in_order: Vec<(String, Vec<u8>)>,
+}
+
+/// A shared live entry delivered by [`crate::LiveSubscription`].
+///
+/// This wraps an [`EntryRef`] in reference counting so one decoded journal entry can be dispatched
+/// to multiple live subscribers without duplicating all field storage.
+#[derive(Debug, Clone)]
+pub struct LiveEntry(Arc<EntryRef>);
+
+impl LiveEntry {
+    pub(crate) fn new(entry: EntryRef) -> Self {
+        Self(Arc::new(entry))
+    }
+
+    /// Convert this shared live entry into an owned entry.
+    pub fn into_owned(self) -> EntryOwned {
+        self.0.as_ref().to_owned()
+    }
+}
+
+impl Deref for LiveEntry {
+    type Target = EntryRef;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref()
+    }
+}
+
+impl AsRef<EntryRef> for LiveEntry {
+    fn as_ref(&self) -> &EntryRef {
+        self.0.as_ref()
+    }
 }
 
 impl EntryOwned {
@@ -198,6 +232,14 @@ impl EntryRef {
     /// Sequence number for this entry.
     pub fn seqnum(&self) -> u64 {
         self.seqnum
+    }
+
+    pub(crate) fn entry_offset_raw(&self) -> u64 {
+        self.entry_offset
+    }
+
+    pub(crate) fn file_id_raw(&self) -> [u8; 16] {
+        self.file_id
     }
 }
 

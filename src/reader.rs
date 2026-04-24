@@ -1,4 +1,5 @@
 use crate::error::{Result, SdJournalError};
+#[cfg(test)]
 use crate::util::checked_add_u64;
 use std::fs::File;
 use std::path::PathBuf;
@@ -59,11 +60,6 @@ impl AsRef<[u8]> for ByteBuf {
     }
 }
 
-pub(crate) trait RandomAccess: Send + Sync {
-    fn len(&self) -> Result<u64>;
-    fn read(&self, offset: u64, len: usize) -> Result<ByteBuf>;
-}
-
 #[derive(Clone)]
 pub(crate) struct FileAccess {
     path: PathBuf,
@@ -74,17 +70,28 @@ impl FileAccess {
     pub(crate) fn new(path: PathBuf, file: Arc<File>) -> Self {
         Self { path, file }
     }
-}
 
-impl RandomAccess for FileAccess {
-    fn len(&self) -> Result<u64> {
+    pub(crate) fn file(&self) -> Arc<File> {
+        self.file.clone()
+    }
+
+    pub(crate) fn read_known_valid(&self, offset: u64, len: usize) -> Result<ByteBuf> {
+        let mut buf = vec![0u8; len];
+        read_exact_at(self.file.as_ref(), offset, &mut buf)
+            .map_err(|e| SdJournalError::io("read_at", Some(self.path.clone()), e))?;
+        Ok(ByteBuf::from_vec(buf))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> Result<u64> {
         self.file
             .metadata()
             .map_err(|e| SdJournalError::io("metadata", Some(self.path.clone()), e))
             .map(|m| m.len())
     }
 
-    fn read(&self, offset: u64, len: usize) -> Result<ByteBuf> {
+    #[cfg(test)]
+    pub(crate) fn read(&self, offset: u64, len: usize) -> Result<ByteBuf> {
         let end = checked_add_u64(offset, u64::try_from(len).unwrap_or(u64::MAX), "read range")?;
         let file_len = self.len()?;
         if end > file_len {
@@ -94,10 +101,7 @@ impl RandomAccess for FileAccess {
             });
         }
 
-        let mut buf = vec![0u8; len];
-        read_exact_at(self.file.as_ref(), offset, &mut buf)
-            .map_err(|e| SdJournalError::io("read_at", Some(self.path.clone()), e))?;
-        Ok(ByteBuf::from_vec(buf))
+        self.read_known_valid(offset, len)
     }
 }
 
@@ -118,27 +122,8 @@ impl MmapAccess {
     pub(crate) fn file(&self) -> Arc<File> {
         self.file.clone()
     }
-}
 
-#[cfg(feature = "mmap")]
-impl RandomAccess for MmapAccess {
-    fn len(&self) -> Result<u64> {
-        self.file
-            .metadata()
-            .map_err(|e| SdJournalError::io("metadata", Some(self.path.clone()), e))
-            .map(|m| m.len())
-    }
-
-    fn read(&self, offset: u64, len: usize) -> Result<ByteBuf> {
-        let end = checked_add_u64(offset, u64::try_from(len).unwrap_or(u64::MAX), "read range")?;
-        let file_len = self.len()?;
-        if end > file_len {
-            return Err(SdJournalError::Transient {
-                path: Some(self.path.clone()),
-                reason: format!("mmap read beyond end of file (file_len={file_len}, end={end})"),
-            });
-        }
-
+    pub(crate) fn read_known_valid(&self, offset: u64, len: usize) -> Result<ByteBuf> {
         let start = usize::try_from(offset).map_err(|_| SdJournalError::Corrupt {
             path: Some(self.path.clone()),
             offset: Some(offset),
@@ -153,6 +138,28 @@ impl RandomAccess for MmapAccess {
             })?;
 
         ByteBuf::from_mmap(self.map.clone(), start..end, &self.path)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> Result<u64> {
+        self.file
+            .metadata()
+            .map_err(|e| SdJournalError::io("metadata", Some(self.path.clone()), e))
+            .map(|m| m.len())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn read(&self, offset: u64, len: usize) -> Result<ByteBuf> {
+        let end = checked_add_u64(offset, u64::try_from(len).unwrap_or(u64::MAX), "read range")?;
+        let file_len = self.len()?;
+        if end > file_len {
+            return Err(SdJournalError::Transient {
+                path: Some(self.path.clone()),
+                reason: format!("mmap read beyond end of file (file_len={file_len}, end={end})"),
+            });
+        }
+
+        self.read_known_valid(offset, len)
     }
 }
 

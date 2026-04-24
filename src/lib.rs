@@ -24,9 +24,10 @@
 //! - [`JournalQuery`] builds historical filters, time bounds, and cursor resumes.
 //! - [`EntryRef`] exposes zero-copy entry views when possible.
 //! - [`EntryOwned`] detaches an entry for storage, async use, or cross-thread transfer.
+//! - [`LiveEntry`] is the shared live-delivery wrapper used by subscriptions.
 //! - [`Cursor`] provides checkpoint and resume tokens.
 //! - [`LiveJournal`] shares one live tail engine across multiple subscriptions.
-//! - [`LiveSubscription`] receives owned entries dispatched by the live engine.
+//! - [`LiveSubscription`] receives shared live entries dispatched by the live engine.
 //!
 //! # Quick Start
 //!
@@ -66,7 +67,7 @@ mod util;
 
 pub use crate::config::JournalConfig;
 pub use crate::cursor::Cursor;
-pub use crate::entry::{EntryOwned, EntryRef};
+pub use crate::entry::{EntryOwned, EntryRef, LiveEntry};
 pub use crate::error::{Result, SdJournalError};
 pub use crate::journal::Journal;
 #[cfg(feature = "tokio")]

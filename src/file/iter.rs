@@ -417,6 +417,42 @@ impl FileEntryIter {
     }
 }
 
+impl JournalFile {
+    pub(crate) fn entry_array_offsets(&self) -> Result<Vec<u64>> {
+        let mut arrays = Vec::new();
+        let mut next = self.inner.header.entry_array_offset;
+        let mut steps = 0usize;
+
+        while next != 0 {
+            arrays.push(next);
+            next = read_entry_array_next_offset(self, next)?;
+
+            steps = steps.saturating_add(1);
+            if steps > self.inner.config.max_object_chain_steps {
+                return Err(SdJournalError::LimitExceeded {
+                    kind: LimitKind::ObjectChainSteps,
+                    limit: u64::try_from(self.inner.config.max_object_chain_steps)
+                        .unwrap_or(u64::MAX),
+                });
+            }
+        }
+
+        Ok(arrays)
+    }
+
+    pub(crate) fn read_entry_array_items(&self, offset: u64) -> Result<Vec<u64>> {
+        let mut items = read_entry_array_object(self, offset)?.items;
+        while matches!(items.last(), Some(0)) {
+            items.pop();
+        }
+        Ok(items)
+    }
+
+    pub(crate) fn read_entry_array_next_offset(&self, offset: u64) -> Result<u64> {
+        read_entry_array_next_offset(self, offset)
+    }
+}
+
 impl Iterator for FileEntryIter {
     type Item = Result<EntryMeta>;
 

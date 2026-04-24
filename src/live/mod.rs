@@ -5,11 +5,13 @@ mod watcher;
 
 use crate::config::JournalConfig;
 use crate::cursor::{Cursor, SdJournalEntryKey};
-use crate::entry::EntryOwned;
+use crate::entry::{EntryOwned, EntryRef, LiveEntry};
 use crate::error::{LimitKind, Result, SdJournalError};
+use crate::file::JournalFile;
 use crate::journal::Journal;
 use crate::util::is_ascii_field_name;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{
@@ -17,7 +19,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering as AtomicOrdering},
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 #[cfg(feature = "tokio")]
 pub use self::tokio::TokioSubscription;
@@ -39,24 +41,169 @@ struct CompiledFilter {
 }
 
 impl CompiledFilter {
-    fn matches(&self, entry: &EntryOwned) -> bool {
+    fn matches<E: MatchableEntry>(&self, entry: &E) -> bool {
         self.branches
             .iter()
             .any(|branch| branch.iter().all(|term| term_matches(entry, term)))
     }
 }
 
+trait MatchableEntry {
+    fn get_field(&self, field: &str) -> Option<&[u8]>;
+    fn any_field_equals(&self, field: &str, value: &[u8]) -> bool;
+}
+
+impl MatchableEntry for EntryOwned {
+    fn get_field(&self, field: &str) -> Option<&[u8]> {
+        self.get(field)
+    }
+
+    fn any_field_equals(&self, field: &str, value: &[u8]) -> bool {
+        self.iter_fields()
+            .any(|(name, field_value)| name == field && field_value == value)
+    }
+}
+
+impl MatchableEntry for EntryRef {
+    fn get_field(&self, field: &str) -> Option<&[u8]> {
+        self.get(field)
+    }
+
+    fn any_field_equals(&self, field: &str, value: &[u8]) -> bool {
+        self.iter_fields()
+            .any(|(name, field_value)| name == field && field_value == value)
+    }
+}
+
 struct SubscriptionState {
     filter: CompiledFilter,
-    tx: Sender<Result<EntryOwned>>,
+    tx: Sender<Result<LiveEntry>>,
     start_after: Option<SdJournalEntryKey>,
     alive: Arc<AtomicBool>,
 }
 
+pub(super) struct WatchChange {
+    pub(super) topology_changed: bool,
+    pub(super) modified_paths: Vec<PathBuf>,
+}
+
+impl WatchChange {
+    fn is_empty(&self) -> bool {
+        !self.topology_changed && self.modified_paths.is_empty()
+    }
+}
+
+struct TrackedFile {
+    path: PathBuf,
+    file_id: [u8; 16],
+    file: JournalFile,
+    tail: FileTailCursor,
+}
+
+struct TrackedFiles {
+    files: Vec<TrackedFile>,
+    path_index: HashMap<PathBuf, usize>,
+    last_seen: Option<SdJournalEntryKey>,
+}
+
+struct FallbackDirState {
+    path: PathBuf,
+    modified: Option<SystemTime>,
+}
+
+struct FileTailCursor {
+    known_arrays: Vec<u64>,
+    next_array_idx: usize,
+    next_item_idx: usize,
+    last_entry_offset: Option<u64>,
+}
+
+impl FileTailCursor {
+    fn at_end(file: &JournalFile) -> Result<Self> {
+        let known_arrays = file.entry_array_offsets()?;
+        let (next_array_idx, next_item_idx, last_entry_offset) = match known_arrays.last().copied()
+        {
+            Some(last) => {
+                let items = file.read_entry_array_items(last)?;
+                (known_arrays.len() - 1, items.len(), items.last().copied())
+            }
+            None => (0, 0, None),
+        };
+
+        Ok(Self {
+            known_arrays,
+            next_array_idx,
+            next_item_idx,
+            last_entry_offset,
+        })
+    }
+
+    fn drain_new_offsets(&mut self, file: &JournalFile) -> Result<Vec<u64>> {
+        if self.known_arrays.is_empty() {
+            self.known_arrays = file.entry_array_offsets()?;
+        } else {
+            let mut next =
+                file.read_entry_array_next_offset(*self.known_arrays.last().unwrap_or(&0))?;
+            let mut steps = 0usize;
+            while next != 0 {
+                self.known_arrays.push(next);
+                next = file.read_entry_array_next_offset(next)?;
+                steps = steps.saturating_add(1);
+                if steps > file.max_object_chain_steps() {
+                    return Err(SdJournalError::Transient {
+                        path: Some(file.path().to_path_buf()),
+                        reason: "entry array chain refresh exceeded expected growth".to_string(),
+                    });
+                }
+            }
+        }
+
+        if self.known_arrays.is_empty() {
+            self.known_arrays.clear();
+            self.next_array_idx = 0;
+            self.next_item_idx = 0;
+            self.last_entry_offset = None;
+            return Ok(Vec::new());
+        }
+
+        let start_idx = self.next_array_idx.min(self.known_arrays.len() - 1);
+        let mut out = Vec::new();
+        let mut last_len = 0usize;
+
+        for (idx, array_offset) in self
+            .known_arrays
+            .iter()
+            .copied()
+            .enumerate()
+            .skip(start_idx)
+        {
+            let items = file.read_entry_array_items(array_offset)?;
+            let start = if idx == start_idx {
+                self.next_item_idx.min(items.len())
+            } else {
+                0
+            };
+            out.extend(items[start..].iter().copied().filter(|offset| *offset != 0));
+            if idx + 1 == self.known_arrays.len() {
+                last_len = items.len();
+            }
+        }
+
+        self.next_array_idx = self.known_arrays.len() - 1;
+        self.next_item_idx = last_len;
+        if let Some(last) = out.last().copied() {
+            self.last_entry_offset = Some(last);
+        }
+        Ok(out)
+    }
+}
+
 /// Shared live journal engine for multi-subscription tailing.
 ///
-/// `LiveJournal` owns one watcher, one reopened journal snapshot, and one global live cursor. New
-/// entries are read once and then dispatched to all matching subscriptions.
+/// `LiveJournal` keeps one watcher plus persistent per-file tail state. Ordinary appends are read
+/// incrementally from already-known journal files and dispatched once to all matching
+/// subscriptions. Full directory rescans are reserved for topology changes such as file creation,
+/// removal, or rotation.
 ///
 /// Create it through [`Journal::live`](crate::Journal::live), register one or more
 /// [`LiveSubscription`]s, then drive the engine with [`LiveJournal::poll_once`] or
@@ -65,6 +212,9 @@ pub struct LiveJournal {
     roots: Vec<PathBuf>,
     config: JournalConfig,
     journal: Journal,
+    tracked_files: Vec<TrackedFile>,
+    path_index: HashMap<PathBuf, usize>,
+    fallback_dirs: Vec<FallbackDirState>,
     subscriptions: Vec<SubscriptionState>,
     last_seen: Option<SdJournalEntryKey>,
     #[cfg(target_os = "linux")]
@@ -77,19 +227,23 @@ impl LiveJournal {
     pub(crate) fn from_journal(journal: Journal) -> Result<Self> {
         let roots = journal.inner.roots.clone();
         let config = journal.inner.config.clone();
-        let last_seen = tail_entry_key(&journal)?;
+        let tracked = build_tracked_files(&journal)?;
 
         let mut out = Self {
             roots,
             config,
             journal,
+            tracked_files: tracked.files,
+            path_index: tracked.path_index,
+            fallback_dirs: Vec::new(),
             subscriptions: Vec::new(),
-            last_seen,
+            last_seen: tracked.last_seen,
             #[cfg(target_os = "linux")]
             inotify: None,
             #[cfg(target_os = "linux")]
             watch_paths: Vec::new(),
         };
+        out.refresh_fallback_dirs();
         out.refresh_watchers();
         Ok(out)
     }
@@ -114,14 +268,21 @@ impl LiveJournal {
         &mut self,
         options: SubscriptionOptions,
     ) -> Result<LiveSubscription> {
-        self.refresh_snapshot()?;
-
-        let snapshot_tail = tail_entry_key(&self.journal)?;
         let compiled = options.filter.compile()?;
         let (tx, rx) = mpsc::channel();
         let alive = Arc::new(AtomicBool::new(true));
+        let needs_replay = options.after_cursor.is_some() || options.since_realtime.is_some();
 
-        if options.after_cursor.is_some() || options.since_realtime.is_some() {
+        let snapshot_tail = if needs_replay {
+            self.refresh_snapshot_full()?;
+            let snapshot_tail = tail_entry_key(&self.journal)?;
+            self.last_seen = snapshot_tail;
+            snapshot_tail
+        } else {
+            self.last_seen
+        };
+
+        if needs_replay {
             let mut q = self.journal.query();
             if let Some(since) = options.since_realtime {
                 q.since_realtime(since);
@@ -131,9 +292,9 @@ impl LiveJournal {
             }
 
             for item in q.iter()? {
-                let owned = item?.to_owned();
-                if compiled.matches(&owned) {
-                    let _ = tx.send(Ok(owned));
+                let entry = item?;
+                if compiled.matches(&entry) {
+                    let _ = tx.send(Ok(LiveEntry::new(entry)));
                 }
             }
         }
@@ -159,35 +320,230 @@ impl LiveJournal {
             return Ok(0);
         }
 
-        let changed = self.wait_for_change();
-        if !changed {
+        let change = self.wait_for_change();
+        if change.is_empty() {
             self.remove_closed_subscriptions();
             return Ok(0);
         }
 
-        self.refresh_snapshot()?;
+        if change.topology_changed {
+            return self.refresh_topology_and_dispatch();
+        }
 
-        let mut q = self.journal.query();
+        self.dispatch_modified_paths(&change.modified_paths)
+    }
+
+    /// Run the live engine until every subscription has been dropped.
+    pub fn run(mut self) -> Result<()> {
+        while !self.subscriptions.is_empty() {
+            self.poll_once()?;
+        }
+        Ok(())
+    }
+
+    fn wait_for_change(&mut self) -> WatchChange {
+        core::cfg_select! {
+            target_os = "linux" => {
+                if let Some(w) = self.inotify.as_mut() {
+                    w.wait(self.config.poll_interval)
+                } else {
+                    self.poll_all_files_after_sleep()
+                }
+            }
+            _ => {
+                self.poll_all_files_after_sleep()
+            }
+        }
+    }
+
+    fn poll_all_files_after_sleep(&mut self) -> WatchChange {
+        thread::sleep(self.config.poll_interval);
+
+        let mut topology_changed = false;
+        for dir in &self.fallback_dirs {
+            match std::fs::metadata(&dir.path).and_then(|meta| meta.modified()) {
+                Ok(modified) if Some(modified) != dir.modified => {
+                    topology_changed = true;
+                    break;
+                }
+                Err(_) => {
+                    topology_changed = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        let mut modified_paths = Vec::new();
+        for tracked in &self.tracked_files {
+            match std::fs::metadata(&tracked.path) {
+                Ok(meta) => {
+                    let len = meta.len();
+                    let known = tracked.file.live_state().used_size;
+                    if len < known {
+                        topology_changed = true;
+                        break;
+                    }
+                    if len > known {
+                        modified_paths.push(tracked.path.clone());
+                    }
+                }
+                Err(_) => {
+                    topology_changed = true;
+                    break;
+                }
+            }
+        }
+
+        WatchChange {
+            topology_changed,
+            modified_paths,
+        }
+    }
+
+    fn refresh_snapshot_full(&mut self) -> Result<()> {
+        let journal = Journal::open_dirs_with_config(&self.roots, self.config.clone())?;
+        let tracked = build_tracked_files(&journal)?;
+        self.journal = journal;
+        self.tracked_files = tracked.files;
+        self.path_index = tracked.path_index;
+        self.refresh_fallback_dirs();
+        self.refresh_watchers();
+        Ok(())
+    }
+
+    fn refresh_topology_and_dispatch(&mut self) -> Result<usize> {
+        let journal = Journal::open_dirs_with_config(&self.roots, self.config.clone())?;
+        let mut pending = Vec::new();
+        let mut q = journal.query();
         if let Some(last_seen) = self.last_seen {
             q.after_cursor(cursor_from_key(last_seen));
+        }
+        for item in q.iter()? {
+            pending.push(item?);
+        }
+
+        let tracked = build_tracked_files(&journal)?;
+        self.journal = journal;
+        self.tracked_files = tracked.files;
+        self.path_index = tracked.path_index;
+        self.refresh_fallback_dirs();
+        self.refresh_watchers();
+
+        Ok(self.dispatch_entries(pending, true))
+    }
+
+    fn dispatch_modified_paths(&mut self, paths: &[PathBuf]) -> Result<usize> {
+        let mut pending = Vec::new();
+        let mut active_files = 0usize;
+
+        for path in paths {
+            let Some(&idx) = self.path_index.get(path) else {
+                if is_candidate_journal_path(path) {
+                    return self.refresh_topology_and_dispatch();
+                }
+                continue;
+            };
+
+            let Some(mut entries) = self.refresh_tracked_file(idx)? else {
+                return self.refresh_topology_and_dispatch();
+            };
+            if !entries.is_empty() {
+                active_files = active_files.saturating_add(1);
+            }
+            pending.append(&mut entries);
+        }
+
+        Ok(self.dispatch_entries(pending, active_files <= 1))
+    }
+
+    fn refresh_tracked_file(&mut self, idx: usize) -> Result<Option<Vec<EntryRef>>> {
+        let old_state = self.tracked_files[idx].file.live_state();
+        let reopened = match self.tracked_files[idx].file.refresh_from_current_handle() {
+            Ok(file) => file,
+            Err(SdJournalError::Transient { .. }) | Err(SdJournalError::Corrupt { .. }) => {
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        };
+
+        let tracked = &mut self.tracked_files[idx];
+        if reopened.file_id() != tracked.file_id {
+            return Ok(None);
+        }
+
+        let new_state = reopened.live_state();
+        if new_state.used_size < old_state.used_size || new_state.n_entries < old_state.n_entries {
+            return Ok(None);
+        }
+        if new_state == old_state {
+            tracked.file = reopened;
+            return Ok(Some(Vec::new()));
+        }
+
+        let offsets = match tracked.tail.drain_new_offsets(&reopened) {
+            Ok(offsets) => offsets,
+            Err(SdJournalError::Transient { .. }) | Err(SdJournalError::Corrupt { .. }) => {
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        };
+
+        tracked.file = reopened;
+        let file = tracked.file.clone();
+        let mut entries = Vec::with_capacity(offsets.len());
+        for offset in offsets {
+            entries.push(file.read_entry_ref(offset)?);
+        }
+        Ok(Some(entries))
+    }
+
+    fn dispatch_entries(&mut self, mut pending: Vec<EntryRef>, already_sorted: bool) -> usize {
+        if pending.is_empty() {
+            self.remove_closed_subscriptions();
+            return 0;
+        }
+
+        if !already_sorted && pending.len() > 1 {
+            pending.sort_by(|left, right| {
+                compare_keys(&key_from_entry_ref(left), &key_from_entry_ref(right))
+            });
         }
 
         let mut deliveries = 0usize;
         let mut dead = vec![false; self.subscriptions.len()];
+        let mut matched = Vec::with_capacity(self.subscriptions.len());
 
-        for item in q.iter()? {
-            let owned = item?.to_owned();
-            let key = key_from_owned(&owned);
+        for owned in pending {
+            let key = key_from_entry_ref(&owned);
+            matched.clear();
 
             for (idx, sub) in self.subscriptions.iter_mut().enumerate() {
-                if let Some(start_after) = sub.start_after
-                    && compare_keys(&key, &start_after) != Ordering::Greater
-                {
-                    continue;
+                if let Some(start_after) = sub.start_after {
+                    if compare_keys(&key, &start_after) != Ordering::Greater {
+                        continue;
+                    }
+                    sub.start_after = None;
                 }
 
                 if sub.filter.matches(&owned) {
-                    if sub.tx.send(Ok(owned.clone())).is_ok() {
+                    matched.push(idx);
+                }
+            }
+
+            if !matched.is_empty() {
+                let mut shared = Some(LiveEntry::new(owned));
+                let last_idx = matched.len().saturating_sub(1);
+                for (pos, idx) in matched.iter().copied().enumerate() {
+                    let entry = if pos == last_idx {
+                        shared.take().expect("shared live entry is available")
+                    } else {
+                        shared
+                            .as_ref()
+                            .expect("shared live entry is available")
+                            .clone()
+                    };
+                    if self.subscriptions[idx].tx.send(Ok(entry)).is_ok() {
                         deliveries = deliveries.saturating_add(1);
                     } else {
                         dead[idx] = true;
@@ -207,39 +563,7 @@ impl LiveJournal {
             });
         }
 
-        Ok(deliveries)
-    }
-
-    /// Run the live engine until every subscription has been dropped.
-    pub fn run(mut self) -> Result<()> {
-        while !self.subscriptions.is_empty() {
-            self.poll_once()?;
-        }
-        Ok(())
-    }
-
-    fn wait_for_change(&mut self) -> bool {
-        core::cfg_select! {
-            target_os = "linux" => {
-                if let Some(w) = self.inotify.as_mut() {
-                    w.wait(self.config.poll_interval)
-                } else {
-                    thread::sleep(self.config.poll_interval);
-                    true
-                }
-            }
-            _ => {
-                thread::sleep(self.config.poll_interval);
-                true
-            }
-        }
-    }
-
-    fn refresh_snapshot(&mut self) -> Result<()> {
-        let journal = Journal::open_dirs_with_config(&self.roots, self.config.clone())?;
-        self.journal = journal;
-        self.refresh_watchers();
-        Ok(())
+        deliveries
     }
 
     fn refresh_watchers(&mut self) {
@@ -257,6 +581,10 @@ impl LiveJournal {
                 );
             }
         }
+    }
+
+    fn refresh_fallback_dirs(&mut self) {
+        self.fallback_dirs = collect_fallback_dirs(&self.roots, &self.journal);
     }
 
     fn remove_closed_subscriptions(&mut self) {
@@ -545,15 +873,16 @@ impl SubscriptionOptions {
 
 /// Receiving end of a live subscription.
 ///
-/// Values are delivered as owned entries so they can cross thread boundaries cleanly.
+/// Values are delivered as shared [`LiveEntry`] handles so one decoded entry can be fanned out to
+/// multiple subscribers without duplicating field storage.
 pub struct LiveSubscription {
-    rx: Receiver<Result<EntryOwned>>,
+    rx: Receiver<Result<LiveEntry>>,
     alive: Arc<AtomicBool>,
 }
 
 impl LiveSubscription {
     /// Receive the next entry, blocking until the subscription closes or a value arrives.
-    pub fn recv(&self) -> std::result::Result<Result<EntryOwned>, mpsc::RecvError> {
+    pub fn recv(&self) -> std::result::Result<Result<LiveEntry>, mpsc::RecvError> {
         self.rx.recv()
     }
 
@@ -561,12 +890,12 @@ impl LiveSubscription {
     pub fn recv_timeout(
         &self,
         timeout: Duration,
-    ) -> std::result::Result<Result<EntryOwned>, mpsc::RecvTimeoutError> {
+    ) -> std::result::Result<Result<LiveEntry>, mpsc::RecvTimeoutError> {
         self.rx.recv_timeout(timeout)
     }
 
     /// Try to receive the next queued entry without blocking.
-    pub fn try_recv(&self) -> std::result::Result<Result<EntryOwned>, mpsc::TryRecvError> {
+    pub fn try_recv(&self) -> std::result::Result<Result<LiveEntry>, mpsc::TryRecvError> {
         self.rx.try_recv()
     }
 }
@@ -591,6 +920,73 @@ fn collect_watch_paths(roots: &[PathBuf], journal: &Journal) -> Vec<PathBuf> {
     watch_paths
 }
 
+fn collect_fallback_dirs(roots: &[PathBuf], journal: &Journal) -> Vec<FallbackDirState> {
+    let mut dirs: Vec<PathBuf> = roots.to_vec();
+    for file in &journal.inner.files {
+        if let Some(parent) = file.path().parent() {
+            dirs.push(parent.to_path_buf());
+        }
+    }
+    dirs.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+    dirs.dedup();
+    dirs.into_iter()
+        .map(|path| FallbackDirState {
+            modified: std::fs::metadata(&path)
+                .and_then(|meta| meta.modified())
+                .ok(),
+            path,
+        })
+        .collect()
+}
+
+fn build_tracked_files(journal: &Journal) -> Result<TrackedFiles> {
+    let mut tracked_files = Vec::with_capacity(journal.inner.files.len());
+    let mut path_index = HashMap::with_capacity(journal.inner.files.len());
+    let mut last_seen = None;
+
+    for file in &journal.inner.files {
+        let path = file.path().to_path_buf();
+        let tail = FileTailCursor::at_end(file)?;
+        if let Some(offset) = tail.last_entry_offset {
+            let meta = file.read_entry_meta(offset)?;
+            let key = SdJournalEntryKey {
+                file_id: meta.file_id,
+                entry_offset: meta.entry_offset,
+                seqnum: meta.seqnum,
+                realtime_usec: meta.realtime_usec,
+            };
+            if last_seen
+                .as_ref()
+                .is_none_or(|last| compare_keys(&key, last) == Ordering::Greater)
+            {
+                last_seen = Some(key);
+            }
+        }
+
+        let tracked = TrackedFile {
+            path: path.clone(),
+            file_id: file.file_id(),
+            file: file.clone(),
+            tail,
+        };
+        path_index.insert(path, tracked_files.len());
+        tracked_files.push(tracked);
+    }
+
+    Ok(TrackedFiles {
+        files: tracked_files,
+        path_index,
+        last_seen,
+    })
+}
+
+fn is_candidate_journal_path(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some("journal") | Some("journal~")
+    )
+}
+
 fn tail_entry_key(journal: &Journal) -> Result<Option<SdJournalEntryKey>> {
     let mut q = journal.query();
     q.seek_tail().limit(1);
@@ -608,10 +1004,10 @@ fn tail_entry_key(journal: &Journal) -> Result<Option<SdJournalEntryKey>> {
         .map(Some)
 }
 
-fn key_from_owned(entry: &EntryOwned) -> SdJournalEntryKey {
+fn key_from_entry_ref(entry: &EntryRef) -> SdJournalEntryKey {
     SdJournalEntryKey {
-        file_id: entry.file_id,
-        entry_offset: entry.entry_offset,
+        file_id: entry.file_id_raw(),
+        entry_offset: entry.entry_offset_raw(),
         seqnum: entry.seqnum(),
         realtime_usec: entry.realtime_usec(),
     }
@@ -657,12 +1053,10 @@ fn build_branches(filter: &LiveFilter) -> Vec<Vec<MatchTerm>> {
     out
 }
 
-fn term_matches(entry: &EntryOwned, term: &MatchTerm) -> bool {
+fn term_matches<E: MatchableEntry>(entry: &E, term: &MatchTerm) -> bool {
     match term {
-        MatchTerm::Exact { field, value } => entry
-            .iter_fields()
-            .any(|(name, field_value)| name == field.as_str() && field_value == value.as_slice()),
-        MatchTerm::Present { field } => entry.get(field).is_some(),
+        MatchTerm::Exact { field, value } => entry.any_field_equals(field, value.as_slice()),
+        MatchTerm::Present { field } => entry.get_field(field).is_some(),
     }
 }
 
@@ -728,5 +1122,31 @@ mod tests {
         assert_eq!(compare_keys(&earlier, &later), Ordering::Less);
         assert_eq!(compare_keys(&later, &earlier), Ordering::Greater);
         assert_eq!(compare_keys(&earlier, &earlier), Ordering::Equal);
+    }
+
+    #[test]
+    fn term_matches_handles_exact_and_present_terms() {
+        let entry = sample_entry();
+
+        assert!(term_matches(
+            &entry,
+            &MatchTerm::Exact {
+                field: "MESSAGE".to_string(),
+                value: b"hello".to_vec(),
+            }
+        ));
+        assert!(term_matches(
+            &entry,
+            &MatchTerm::Present {
+                field: "_SYSTEMD_UNIT".to_string(),
+            }
+        ));
+        assert!(!term_matches(
+            &entry,
+            &MatchTerm::Exact {
+                field: "MESSAGE".to_string(),
+                value: b"missing".to_vec(),
+            }
+        ));
     }
 }

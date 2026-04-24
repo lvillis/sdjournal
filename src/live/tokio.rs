@@ -1,5 +1,5 @@
 use super::LiveSubscription;
-use crate::entry::EntryOwned;
+use crate::entry::LiveEntry;
 use crate::error::Result;
 use std::thread;
 
@@ -8,9 +8,9 @@ const DEFAULT_TOKIO_SUBSCRIPTION_BUFFER: usize = 1024;
 /// Tokio adapter for [`LiveSubscription`].
 ///
 /// Internally this spawns a blocking worker thread that drains the subscription receiver and
-/// forwards owned entries through a bounded Tokio channel.
+/// forwards shared live entries through a bounded Tokio channel.
 pub struct TokioSubscription {
-    rx: tokio::sync::mpsc::Receiver<Result<EntryOwned>>,
+    rx: tokio::sync::mpsc::Receiver<Result<LiveEntry>>,
 }
 
 impl TokioSubscription {
@@ -27,12 +27,12 @@ impl TokioSubscription {
     }
 
     /// Receive the next entry from the Tokio adapter.
-    pub async fn next(&mut self) -> Option<Result<EntryOwned>> {
+    pub async fn next(&mut self) -> Option<Result<LiveEntry>> {
         self.rx.recv().await
     }
 
     /// Convert into the underlying Tokio receiver.
-    pub fn into_receiver(self) -> tokio::sync::mpsc::Receiver<Result<EntryOwned>> {
+    pub fn into_receiver(self) -> tokio::sync::mpsc::Receiver<Result<LiveEntry>> {
         self.rx
     }
 }

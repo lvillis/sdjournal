@@ -106,7 +106,7 @@ fn spawn_subscription_worker(
 fn recv_live_entry(
     unit: &str,
     subscription: &sdjournal::LiveSubscription,
-) -> Result<Option<sdjournal::EntryOwned>, Box<dyn Error + Send + Sync>> {
+) -> Result<Option<sdjournal::LiveEntry>, Box<dyn Error + Send + Sync>> {
     match subscription.recv_timeout(Duration::from_secs(30)) {
         Ok(item) => Ok(Some(item?)),
         Err(RecvTimeoutError::Timeout) => {
@@ -122,7 +122,7 @@ fn recv_live_entry(
 
 fn print_live_entry(
     unit: &str,
-    entry: &sdjournal::EntryOwned,
+    entry: &sdjournal::LiveEntry,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let msg = entry
         .get("MESSAGE")

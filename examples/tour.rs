@@ -186,7 +186,7 @@ fn follow_unit(journal: &Journal, unit: &str, limit: usize) -> Result<(), Box<dy
 
     for _ in 0..limit {
         let entry = subscription.recv()??;
-        print_owned_entry("live", &entry);
+        print_live_entry("live", &entry);
     }
 
     Ok(())
@@ -230,6 +230,27 @@ fn print_borrowed_entry(label: &str, entry: &EntryRef) {
 }
 
 fn print_owned_entry(label: &str, entry: &EntryOwned) {
+    let unit = entry
+        .get("_SYSTEMD_UNIT")
+        .or_else(|| entry.get("UNIT"))
+        .map(|v| String::from_utf8_lossy(v).into_owned())
+        .unwrap_or_else(|| "-".to_string());
+    let msg = entry
+        .get("MESSAGE")
+        .map(|v| String::from_utf8_lossy(v).into_owned())
+        .unwrap_or_else(|| "<no MESSAGE>".to_string());
+
+    println!(
+        "{label}: realtime={} seq={} unit={} cursor={} message={}",
+        entry.realtime_usec(),
+        entry.seqnum(),
+        unit,
+        entry.cursor().map(|c| c.to_string()).unwrap_or_default(),
+        msg
+    );
+}
+
+fn print_live_entry(label: &str, entry: &sdjournal::LiveEntry) {
     let unit = entry
         .get("_SYSTEMD_UNIT")
         .or_else(|| entry.get("UNIT"))
