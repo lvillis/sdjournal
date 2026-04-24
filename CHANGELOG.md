@@ -1,3 +1,8 @@
+## [0.1.15] - 2026-04-24
+
+### ⚡ Performance
+
+- *(live)* [**breaking**] Optimize shared live tailing
 ## [0.1.14] - 2026-04-23
 
 ### 🚀 Features
@@ -7,6 +12,10 @@
 ### 🐛 Bug Fixes
 
 - Ci
+
+### ⚙️ Miscellaneous Tasks
+
+- *(release)* 0.1.14
 ## [0.1.13] - 2026-04-02
 
 ### ⚙️ Miscellaneous Tasks
