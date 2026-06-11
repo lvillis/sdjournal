@@ -1,8 +1,18 @@
+## [0.1.16] - 2026-06-11
+
+### ⚙️ Miscellaneous Tasks
+
+- *(ci)* Replace third-party workflow actions
+- *(docs)* Improve public API rustdoc
 ## [0.1.15] - 2026-04-24
 
 ### ⚡ Performance
 
 - *(live)* [**breaking**] Optimize shared live tailing
+
+### ⚙️ Miscellaneous Tasks
+
+- *(release)* 0.1.15
 ## [0.1.14] - 2026-04-23
 
 ### 🚀 Features
