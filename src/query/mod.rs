@@ -26,9 +26,39 @@ enum MatchTerm {
 /// `JournalQuery` is mutable and chainable: each builder method updates the query in place and
 /// returns `&mut Self`.
 ///
+/// Terms added directly to the query are AND-ed together. Each [`JournalQuery::or_group`] call
+/// adds one alternative branch; terms inside that group are also AND-ed together. The full query
+/// is therefore:
+///
+/// `global_terms AND (group_1 OR group_2 OR ...)`
+///
 /// Validation for field names and query-term limits is intentionally deferred. Builder methods
 /// record validation failures internally, and terminal methods such as [`JournalQuery::iter`] and
 /// [`JournalQuery::collect_owned`] surface them as [`SdJournalError`] values.
+///
+/// # Example
+///
+/// ```no_run
+/// use sdjournal::Journal;
+///
+/// let journal = Journal::open_default()?;
+/// let mut query = journal.query();
+/// query
+///     .match_present("MESSAGE")
+///     .or_group(|g| {
+///         g.match_exact("_SYSTEMD_UNIT", b"sshd.service");
+///     })
+///     .or_group(|g| {
+///         g.match_exact("_SYSTEMD_UNIT", b"systemd.service");
+///     })
+///     .limit(10);
+///
+/// for item in query.iter()? {
+///     let entry = item?;
+///     println!("{}", entry.realtime_usec());
+/// }
+/// # Ok::<(), sdjournal::SdJournalError>(())
+/// ```
 #[derive(Clone)]
 pub struct JournalQuery {
     journal: Journal,
@@ -63,6 +93,8 @@ impl JournalQuery {
 
     /// Match entries whose field equals `value` byte-for-byte.
     ///
+    /// Multiple exact and presence terms added directly to the query are AND-ed together.
+    ///
     /// Field-name validation is deferred until a terminal method is called.
     pub fn match_exact(&mut self, field: &str, value: &[u8]) -> &mut Self {
         if self.invalid_reason.is_some() {
@@ -92,6 +124,8 @@ impl JournalQuery {
     }
 
     /// Match entries that contain `field`, regardless of its value.
+    ///
+    /// Multiple exact and presence terms added directly to the query are AND-ed together.
     ///
     /// Field-name validation is deferred until a terminal method is called.
     pub fn match_present(&mut self, field: &str) -> &mut Self {
@@ -190,12 +224,28 @@ impl JournalQuery {
 
     /// Add an OR-group to the query.
     ///
-    /// Terms added inside the closure are OR-ed together, then AND-ed with the rest of the query.
-    /// Empty groups are ignored.
+    /// Each call creates one OR branch. Terms added inside the closure are AND-ed together within
+    /// that branch. Empty groups are ignored.
     ///
-    /// This is useful for queries such as:
+    /// For example, the following represents:
     ///
-    /// `(_PID=1 OR _UID=0) AND _SYSTEMD_UNIT=sshd.service`
+    /// `_SYSTEMD_UNIT=sshd.service AND ((_PID=1 AND _UID=0) OR (PRIORITY=3))`
+    ///
+    /// ```no_run
+    /// # use sdjournal::Journal;
+    /// # let journal = Journal::open_default()?;
+    /// let mut query = journal.query();
+    /// query
+    ///     .match_exact("_SYSTEMD_UNIT", b"sshd.service")
+    ///     .or_group(|g| {
+    ///         g.match_exact("_PID", b"1");
+    ///         g.match_exact("_UID", b"0");
+    ///     })
+    ///     .or_group(|g| {
+    ///         g.match_exact("PRIORITY", b"3");
+    ///     });
+    /// # Ok::<(), sdjournal::SdJournalError>(())
+    /// ```
     pub fn or_group<F>(&mut self, f: F) -> &mut Self
     where
         F: FnOnce(&mut OrGroupBuilder),
@@ -288,7 +338,8 @@ impl JournalQuery {
     /// Validate the query and create a streaming iterator of matching entries.
     ///
     /// The iterator yields [`EntryRef`] values, which borrow or share underlying journal storage
-    /// when possible.
+    /// when possible. Convert entries with [`EntryRef::to_owned`] if they must outlive the
+    /// iterator's immediate processing path.
     pub fn iter(&self) -> Result<impl Iterator<Item = Result<EntryRef>> + use<>> {
         self.validate()?;
         JournalIter::new(self.clone())
@@ -346,7 +397,8 @@ impl JournalQuery {
 
 /// Builder used inside [`JournalQuery::or_group`].
 ///
-/// This type is usually used only from the closure passed to [`JournalQuery::or_group`].
+/// This type is usually used only from the closure passed to [`JournalQuery::or_group`]. Multiple
+/// terms added to the same builder are AND-ed together.
 pub struct OrGroupBuilder {
     terms: Vec<MatchTerm>,
     config: crate::config::JournalConfig,

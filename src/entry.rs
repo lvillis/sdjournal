@@ -5,6 +5,10 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 /// An owned journal entry, suitable for caching, cross-thread use, or async contexts.
+///
+/// `EntryOwned` stores field values in owned `Vec<u8>` buffers. Use it when an entry must outlive
+/// the immediate query iteration, be retained in an application cache, or cross thread/task
+/// boundaries without keeping journal storage alive.
 #[derive(Debug, Clone)]
 pub struct EntryOwned {
     pub(crate) file_id: [u8; 16],
@@ -20,6 +24,10 @@ pub struct EntryOwned {
 ///
 /// This wraps an [`EntryRef`] in reference counting so one decoded journal entry can be dispatched
 /// to multiple live subscribers without duplicating all field storage.
+///
+/// `LiveEntry` dereferences to [`EntryRef`], so methods such as [`EntryRef::get`] and
+/// [`EntryRef::cursor`] can be called directly. Convert it with [`LiveEntry::into_owned`] if the
+/// entry must be stored independently of live delivery internals.
 #[derive(Debug, Clone)]
 pub struct LiveEntry(Arc<EntryRef>);
 
@@ -29,6 +37,8 @@ impl LiveEntry {
     }
 
     /// Convert this shared live entry into an owned entry.
+    ///
+    /// This copies all visible field values into owned buffers.
     pub fn into_owned(self) -> EntryOwned {
         self.0.as_ref().to_owned()
     }
@@ -70,6 +80,9 @@ impl EntryOwned {
     }
 
     /// Return the entry cursor.
+    ///
+    /// Store this cursor to resume later with [`crate::JournalQuery::after_cursor`] or
+    /// [`crate::SubscriptionOptions::after_cursor`].
     pub fn cursor(&self) -> Result<Cursor> {
         Ok(Cursor::new_entry_key(
             self.file_id,
@@ -80,6 +93,9 @@ impl EntryOwned {
     }
 
     /// Get the first occurrence of a field.
+    ///
+    /// Journal entries can contain duplicate fields. Use [`EntryOwned::iter_fields`] when duplicate
+    /// values matter.
     pub fn get(&self, field: &str) -> Option<&[u8]> {
         self.fields_in_order
             .iter()
@@ -87,7 +103,7 @@ impl EntryOwned {
             .map(|(_, v)| v.as_slice())
     }
 
-    /// Iterate over all fields (including duplicates) in entry order.
+    /// Iterate over all fields, including duplicates, in entry order.
     pub fn iter_fields(&self) -> impl Iterator<Item = (&str, &[u8])> {
         self.fields_in_order
             .iter()
@@ -129,7 +145,11 @@ impl FieldRef {
     }
 }
 
-/// A zero-copy entry view, backed by journal file storage (mmap) when possible.
+/// A zero-copy entry view, backed by journal file storage when possible.
+///
+/// Query iterators yield `EntryRef` to avoid copying field payloads by default. The value is cheap
+/// to inspect during iteration, but callers should use [`EntryRef::to_owned`] before storing it in
+/// long-lived application state.
 #[derive(Debug, Clone)]
 pub struct EntryRef {
     file_id: [u8; 16],
@@ -172,6 +192,8 @@ impl EntryRef {
     }
 
     /// Convert this entry to an owned representation.
+    ///
+    /// This copies all visible field values into an [`EntryOwned`].
     pub fn to_owned(&self) -> EntryOwned {
         let mut fields = Vec::with_capacity(self.fields_in_order.len());
         for f in &self.fields_in_order {
@@ -190,6 +212,9 @@ impl EntryRef {
     }
 
     /// Return the entry cursor.
+    ///
+    /// Store this cursor to resume later with [`crate::JournalQuery::after_cursor`] or
+    /// [`crate::SubscriptionOptions::after_cursor`].
     pub fn cursor(&self) -> Result<Cursor> {
         Ok(Cursor::new_entry_key(
             self.file_id,
@@ -200,6 +225,9 @@ impl EntryRef {
     }
 
     /// Get the first occurrence of a field.
+    ///
+    /// Journal entries can contain duplicate fields. Use [`EntryRef::iter_fields`] when duplicate
+    /// values matter.
     pub fn get(&self, field: &str) -> Option<&[u8]> {
         self.fields_in_order
             .iter()
@@ -207,7 +235,7 @@ impl EntryRef {
             .map(|f| f.value())
     }
 
-    /// Iterate over all fields (including duplicates) in entry order.
+    /// Iterate over all fields, including duplicates, in entry order.
     pub fn iter_fields(&self) -> impl Iterator<Item = (&str, &[u8])> {
         self.fields_in_order
             .iter()

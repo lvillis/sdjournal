@@ -61,6 +61,16 @@ impl fmt::Display for LimitKind {
 }
 
 /// A structured error type for journal operations.
+///
+/// The variants are intended to support operational decisions:
+///
+/// - [`SdJournalError::Transient`] means the journal may be changing concurrently; retrying later
+///   is usually reasonable.
+/// - [`SdJournalError::Corrupt`] means the file contents were internally inconsistent.
+/// - [`SdJournalError::Unsupported`] means the file or operation uses a capability this crate does
+///   not implement.
+/// - [`SdJournalError::PermissionDenied`] usually requires changing process privileges or opening
+///   a different journal root.
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum SdJournalError {

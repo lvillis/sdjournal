@@ -208,6 +208,41 @@ impl FileTailCursor {
 /// Create it through [`Journal::live`](crate::Journal::live), register one or more
 /// [`LiveSubscription`]s, then drive the engine with [`LiveJournal::poll_once`] or
 /// [`LiveJournal::run`].
+///
+/// # Model
+///
+/// Subscriptions are passive receivers. The engine only observes new journal data while
+/// [`LiveJournal::poll_once`] or [`LiveJournal::run`] is being called. A subscription created with
+/// [`LiveJournal::subscribe`] is live-only: it starts after the current tail and does not replay
+/// existing entries. Use [`SubscriptionOptions`] when a replay window is needed.
+///
+/// # Example
+///
+/// ```no_run
+/// use sdjournal::Journal;
+/// use std::thread;
+///
+/// let journal = Journal::open_default()?;
+/// let mut live = journal.live()?;
+///
+/// let mut sshd_filter = live.filter();
+/// sshd_filter.match_unit("sshd.service");
+/// let sshd = live.subscribe(sshd_filter)?;
+///
+/// let mut systemd_filter = live.filter();
+/// systemd_filter.match_unit("systemd.service");
+/// let systemd = live.subscribe(systemd_filter)?;
+///
+/// let engine = thread::spawn(move || live.run());
+///
+/// let _entry = sshd.recv().expect("engine stopped")?;
+/// let _entry = systemd.recv().expect("engine stopped")?;
+///
+/// drop(sshd);
+/// drop(systemd);
+/// engine.join().expect("live engine thread panicked")?;
+/// # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+/// ```
 pub struct LiveJournal {
     roots: Vec<PathBuf>,
     config: JournalConfig,
@@ -249,6 +284,10 @@ impl LiveJournal {
     }
 
     /// Create a new live filter builder using this engine's runtime limits.
+    ///
+    /// Build one filter per subscription. Filters are cheap and do not start watching the journal
+    /// until they are registered with [`LiveJournal::subscribe`] or
+    /// [`LiveJournal::subscribe_with_options`].
     pub fn filter(&self) -> LiveFilter {
         LiveFilter::new(self.config.clone())
     }
@@ -256,6 +295,8 @@ impl LiveJournal {
     /// Register a live-only subscription.
     ///
     /// The returned subscription only receives entries appended after the current live tail.
+    /// It does not scan historical entries. This is the preferred path for normal tailing because
+    /// registering the subscription does not rebuild query state.
     pub fn subscribe(&mut self, filter: LiveFilter) -> Result<LiveSubscription> {
         self.subscribe_with_options(SubscriptionOptions::new(filter))
     }
@@ -264,6 +305,9 @@ impl LiveJournal {
     ///
     /// Any matching backlog covered by `options` is queued to the subscription immediately.
     /// Future live entries are then dispatched through the shared engine.
+    ///
+    /// This may perform a full snapshot refresh to establish the replay boundary. Prefer
+    /// [`LiveJournal::subscribe`] when only future entries are needed.
     pub fn subscribe_with_options(
         &mut self,
         options: SubscriptionOptions,
@@ -314,6 +358,9 @@ impl LiveJournal {
     /// Returns the total number of subscription deliveries performed during this cycle.
     /// This may be larger than the number of journal entries because one entry can match multiple
     /// subscriptions.
+    ///
+    /// The call blocks for at most [`JournalConfig::poll_interval`] when no platform watcher is
+    /// available. On Linux it uses inotify when possible and falls back to polling.
     pub fn poll_once(&mut self) -> Result<usize> {
         self.remove_closed_subscriptions();
         if self.subscriptions.is_empty() {
@@ -334,6 +381,9 @@ impl LiveJournal {
     }
 
     /// Run the live engine until every subscription has been dropped.
+    ///
+    /// This is the simplest way to drive live delivery from a background thread. Dropping all
+    /// [`LiveSubscription`] handles causes the loop to exit after the next polling cycle.
     pub fn run(mut self) -> Result<()> {
         while !self.subscriptions.is_empty() {
             self.poll_once()?;
@@ -597,6 +647,9 @@ impl LiveJournal {
 ///
 /// The filter DSL mirrors the historical query builder, but it only describes live matching
 /// predicates. Time bounds and cursor resumes are configured through [`SubscriptionOptions`].
+///
+/// Direct terms are AND-ed together. Each [`LiveFilter::or_group`] call adds one alternative
+/// branch whose terms are also AND-ed together.
 #[derive(Clone)]
 pub struct LiveFilter {
     config: JournalConfig,
@@ -618,6 +671,10 @@ impl LiveFilter {
     }
 
     /// Match entries whose field equals `value` byte-for-byte.
+    ///
+    /// Multiple terms added directly to a filter are AND-ed together. Validation is deferred until
+    /// the filter is registered with [`LiveJournal::subscribe`] or
+    /// [`LiveJournal::subscribe_with_options`].
     pub fn match_exact(&mut self, field: &str, value: &[u8]) -> &mut Self {
         if self.invalid_reason.is_some() {
             return self;
@@ -639,6 +696,10 @@ impl LiveFilter {
     }
 
     /// Match entries that contain `field`, regardless of its value.
+    ///
+    /// Multiple terms added directly to a filter are AND-ed together. Validation is deferred until
+    /// the filter is registered with [`LiveJournal::subscribe`] or
+    /// [`LiveJournal::subscribe_with_options`].
     pub fn match_present(&mut self, field: &str) -> &mut Self {
         if self.invalid_reason.is_some() {
             return self;
@@ -719,8 +780,25 @@ impl LiveFilter {
 
     /// Add an OR-group to the filter.
     ///
-    /// Terms added inside the closure are OR-ed together, then AND-ed with the rest of the
-    /// filter. Empty groups are ignored.
+    /// Each call creates one OR branch. Terms added inside the closure are AND-ed together within
+    /// that branch. Empty groups are ignored.
+    ///
+    /// ```no_run
+    /// # use sdjournal::Journal;
+    /// # let journal = Journal::open_default()?;
+    /// let mut live = journal.live()?;
+    /// let mut filter = live.filter();
+    /// filter
+    ///     .match_present("MESSAGE")
+    ///     .or_group(|g| {
+    ///         g.match_exact("_SYSTEMD_UNIT", b"sshd.service");
+    ///     })
+    ///     .or_group(|g| {
+    ///         g.match_exact("_SYSTEMD_UNIT", b"systemd.service");
+    ///     });
+    /// let _subscription = live.subscribe(filter)?;
+    /// # Ok::<(), sdjournal::SdJournalError>(())
+    /// ```
     pub fn or_group<F>(&mut self, f: F) -> &mut Self
     where
         F: FnOnce(&mut LiveOrGroupBuilder),
@@ -787,6 +865,8 @@ impl LiveFilter {
 }
 
 /// Builder used inside [`LiveFilter::or_group`].
+///
+/// Multiple terms added to the same builder are AND-ed together.
 pub struct LiveOrGroupBuilder {
     terms: Vec<MatchTerm>,
     config: JournalConfig,
@@ -841,6 +921,8 @@ impl LiveOrGroupBuilder {
 /// Options for `LiveJournal` subscriptions.
 ///
 /// Without additional bounds, subscriptions are live-only and start after the current tail.
+/// Adding [`SubscriptionOptions::after_cursor`] or [`SubscriptionOptions::since_realtime`]
+/// requests a replay before the subscription switches to live delivery.
 #[derive(Clone)]
 pub struct SubscriptionOptions {
     filter: LiveFilter,
@@ -859,12 +941,16 @@ impl SubscriptionOptions {
     }
 
     /// Replay matching entries strictly after `cursor` before switching to live delivery.
+    ///
+    /// This is intended for checkpoint-based consumers that persist [`crate::Cursor`] values.
     pub fn after_cursor(&mut self, cursor: Cursor) -> &mut Self {
         self.after_cursor = Some(cursor);
         self
     }
 
     /// Replay matching entries from `usec` before switching to live delivery.
+    ///
+    /// `usec` is a realtime timestamp in microseconds since the Unix epoch.
     pub fn since_realtime(&mut self, usec: u64) -> &mut Self {
         self.since_realtime = Some(usec);
         self
@@ -875,6 +961,9 @@ impl SubscriptionOptions {
 ///
 /// Values are delivered as shared [`LiveEntry`] handles so one decoded entry can be fanned out to
 /// multiple subscribers without duplicating field storage.
+///
+/// Dropping a subscription unregisters it from the engine. When all subscriptions are dropped,
+/// [`LiveJournal::run`] exits.
 pub struct LiveSubscription {
     rx: Receiver<Result<LiveEntry>>,
     alive: Arc<AtomicBool>,
@@ -882,11 +971,17 @@ pub struct LiveSubscription {
 
 impl LiveSubscription {
     /// Receive the next entry, blocking until the subscription closes or a value arrives.
+    ///
+    /// The outer `Result` reports channel closure. The inner crate [`Result`] reports journal
+    /// decoding or I/O errors produced by the live engine.
     pub fn recv(&self) -> std::result::Result<Result<LiveEntry>, mpsc::RecvError> {
         self.rx.recv()
     }
 
     /// Receive the next entry, waiting at most `timeout`.
+    ///
+    /// The outer `Result` distinguishes timeout or channel closure from a delivered value. The
+    /// delivered value is still a crate [`Result`] because reading the journal can fail.
     pub fn recv_timeout(
         &self,
         timeout: Duration,
@@ -895,6 +990,8 @@ impl LiveSubscription {
     }
 
     /// Try to receive the next queued entry without blocking.
+    ///
+    /// This is useful when integrating [`LiveJournal::poll_once`] into an existing event loop.
     pub fn try_recv(&self) -> std::result::Result<Result<LiveEntry>, mpsc::TryRecvError> {
         self.rx.try_recv()
     }

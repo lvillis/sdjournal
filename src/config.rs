@@ -4,36 +4,65 @@ use std::time::Duration;
 ///
 /// These limits are primarily defensive: they bound memory use and traversal work when reading
 /// malformed, truncated, or unexpectedly large journal files.
+///
+/// Defaults are conservative for general-purpose readers. Increase limits only for known-good
+/// deployments with unusually large entries or many journal files. Lower
+/// [`JournalConfig::poll_interval`] when live tail latency matters and a platform watcher is not
+/// available.
 #[derive(Clone, Debug)]
 pub struct JournalConfig {
     /// Maximum object size accepted from the journal file.
+    ///
+    /// This bounds allocation when reading ENTRY, DATA, and related objects.
     pub max_object_size_bytes: u64,
 
     /// Maximum bytes allowed after decompressing a DATA payload.
+    ///
+    /// This protects callers from compressed payloads that expand unexpectedly.
     pub max_decompressed_bytes: usize,
 
     /// Maximum length of a field name.
+    ///
+    /// systemd field names are normally short uppercase identifiers such as `MESSAGE` or
+    /// `_SYSTEMD_UNIT`.
     pub max_field_name_len: usize,
 
     /// Maximum number of fields accepted per entry.
+    ///
+    /// Entries exceeding this limit are treated as malformed or unsupported for this reader.
     pub max_fields_per_entry: usize,
 
     /// Maximum number of journal files included from a single scan.
+    ///
+    /// Discovery fails with [`crate::SdJournalError::LimitExceeded`] if this limit is exceeded.
     pub max_journal_files: usize,
 
     /// Maximum number of steps when traversing any `next_*` chain.
+    ///
+    /// This bounds work when following linked object chains in corrupt or adversarial files.
     pub max_object_chain_steps: usize,
 
     /// Maximum number of query terms (matches) accepted per query.
+    ///
+    /// Unit helpers and OR groups can expand into several internal terms.
     pub max_query_terms: usize,
 
-    /// Whether to allow mmap for `STATE_ONLINE` (potentially still being written) journal files.
+    /// Whether to allow mmap for `STATE_ONLINE` journal files that may still be written.
+    ///
+    /// The default is `false` because concurrently modified files are safer to read through
+    /// explicit file I/O. Offline and archived files may still use mmap when the `mmap` feature is
+    /// enabled.
     pub allow_mmap_online: bool,
 
-    /// Whether to include `*.journal~` temporary/incomplete files during discovery.
+    /// Whether to include `*.journal~` temporary or incomplete files during discovery.
+    ///
+    /// Keep this disabled unless the application explicitly wants best-effort access to temporary
+    /// journal files.
     pub include_journal_tilde: bool,
 
-    /// Polling interval used as fallback when inotify is unavailable/unreliable.
+    /// Polling interval used as fallback when inotify is unavailable or unreliable.
+    ///
+    /// This affects [`crate::LiveJournal`] latency only on fallback polling paths.
     pub poll_interval: Duration,
 }
 

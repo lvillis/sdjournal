@@ -29,6 +29,23 @@
 //! - [`LiveJournal`] shares one live tail engine across multiple subscriptions.
 //! - [`LiveSubscription`] receives shared live entries dispatched by the live engine.
 //!
+//! # Historical vs Live Reads
+//!
+//! Use [`JournalQuery`] for finite historical reads. Queries snapshot the files opened by
+//! [`Journal`] and return matching entries in stable journal order.
+//!
+//! Use [`LiveJournal`] for tailing. A live engine keeps per-file tail state, watches for appended
+//! data, and can fan out each new entry to multiple [`LiveSubscription`]s. Prefer one
+//! [`LiveJournal`] with multiple subscriptions over multiple independent live engines when tailing
+//! several units or filters.
+//!
+//! # Entry Ownership
+//!
+//! [`EntryRef`] is the cheapest representation and is what queries yield by default. Convert it to
+//! [`EntryOwned`] when the entry must be stored, sent across long-lived boundaries, or detached
+//! from the journal reader. Live subscriptions yield [`LiveEntry`], a shared wrapper around
+//! [`EntryRef`] designed for efficient fan-out.
+//!
 //! # Quick Start
 //!
 //! ```no_run
