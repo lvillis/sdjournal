@@ -97,6 +97,34 @@ jobs:
       - name: cargo check (fuzz harnesses)
         run: cargo check --manifest-path fuzz/Cargo.toml
 
+  offline-macos:
+    name: offline (macos-26)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (1.96.0)
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+
+      - name: Restore Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.toml', 'rust-toolchain.toml', '.github/workflows/ci.yml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-
+
+      - name: cargo check (all features)
+        run: cargo check --all-features
+
+      - name: cargo test (offline)
+        run: cargo test --lib --test offline_journal --all-features
+
   golden:
     name: golden (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

@@ -5,8 +5,13 @@
 //!
 //! # Platform
 //!
-//! This crate targets Linux journal files. Non-Linux builds are supported for compilation, but
-//! [`Journal::open_default`] is Linux-only because it depends on the standard journal locations.
+//! This crate parses systemd journal files. Core file parsing, queries, cursors, and compression
+//! decoding work with user-supplied `*.journal` directories on supported Rust hosts.
+//!
+//! Linux additionally supports [`Journal::open_default`] for standard system journal roots and
+//! inotify-backed live watching. On non-Linux hosts, use [`Journal::open_dir`] or
+//! [`Journal::open_dirs`] with exported systemd journal files; [`Journal::open_default`] returns
+//! [`SdJournalError::Unsupported`].
 //!
 //! # Feature Flags
 //!

@@ -85,33 +85,58 @@ pub(super) fn decompress_zstd(_src: &[u8], _max: usize) -> Result<Vec<u8>> {
 
 #[cfg(feature = "xz")]
 pub(super) fn decompress_xz(src: &[u8], max: usize) -> Result<Vec<u8>> {
-    use std::io::Read as _;
-    use xz2::read::XzDecoder;
+    use xz4rust::{DICT_SIZE_PROFILE_6, XzDecoder};
 
-    let mut decoder = XzDecoder::new(src);
+    let dict_limit = max.max(DICT_SIZE_PROFILE_6);
+    let mut decoder = XzDecoder::with_alloc_dict_size(DICT_SIZE_PROFILE_6, dict_limit);
+    let mut input_pos = 0usize;
     let mut out = Vec::new();
     let mut buf = [0u8; 16 * 1024];
 
     loop {
-        let n = decoder
-            .read(&mut buf)
-            .map_err(|e| SdJournalError::DecompressFailed {
+        if input_pos >= src.len() {
+            return Err(SdJournalError::DecompressFailed {
+                algo: CompressionAlgo::Xz,
+                reason: "unexpected end of xz stream".to_string(),
+            });
+        }
+
+        let remaining = max.saturating_sub(out.len());
+        let mut overflow_probe = [0u8; 1];
+        let output = if remaining == 0 {
+            overflow_probe.as_mut_slice()
+        } else {
+            let n = remaining.min(buf.len());
+            &mut buf[..n]
+        };
+
+        let result = decoder.decode(&src[input_pos..], output).map_err(|e| {
+            SdJournalError::DecompressFailed {
                 algo: CompressionAlgo::Xz,
                 reason: e.to_string(),
-            })?;
-        if n == 0 {
-            break;
-        }
-        if out.len().saturating_add(n) > max {
+            }
+        })?;
+
+        input_pos = input_pos.saturating_add(result.input_consumed());
+        let produced = result.output_produced();
+        if remaining == 0 && produced != 0 {
             return Err(SdJournalError::LimitExceeded {
                 kind: LimitKind::DecompressedBytes,
                 limit: u64::try_from(max).unwrap_or(u64::MAX),
             });
         }
-        out.extend_from_slice(&buf[..n]);
-    }
+        out.extend_from_slice(&output[..produced]);
 
-    Ok(out)
+        if result.is_end_of_stream() {
+            return Ok(out);
+        }
+        if !result.made_progress() {
+            return Err(SdJournalError::DecompressFailed {
+                algo: CompressionAlgo::Xz,
+                reason: "xz decoder made no progress".to_string(),
+            });
+        }
+    }
 }
 
 #[cfg(not(feature = "xz"))]
@@ -171,21 +196,40 @@ mod tests {
     #[cfg(feature = "xz")]
     #[test]
     fn xz_roundtrip_and_limit_checks() {
-        use std::io::Write as _;
-
         let plain = b"hello from xz";
-        let mut encoder = xz2::write::XzEncoder::new(Vec::new(), 6);
-        encoder.write_all(plain).unwrap();
-        let encoded = encoder.finish().unwrap();
+        let encoded = xz_fixture();
 
-        assert_eq!(decompress_xz(&encoded, plain.len()).unwrap(), plain);
+        assert_eq!(decompress_xz(encoded, plain.len()).unwrap(), plain);
 
-        match decompress_xz(&encoded, plain.len() - 1) {
+        match decompress_xz(encoded, plain.len() - 1) {
             Err(SdJournalError::LimitExceeded { kind, limit }) => {
                 assert_eq!(kind, LimitKind::DecompressedBytes);
                 assert_eq!(limit, (plain.len() - 1) as u64);
             }
             other => panic!("unexpected result: {other:?}"),
         }
+    }
+
+    #[cfg(feature = "xz")]
+    #[test]
+    fn xz_rejects_invalid_payload() {
+        match decompress_xz(b"not xz", 128) {
+            Err(SdJournalError::DecompressFailed { algo, .. }) => {
+                assert_eq!(algo, CompressionAlgo::Xz);
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "xz")]
+    fn xz_fixture() -> &'static [u8] {
+        &[
+            0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00, 0x00, 0x04, 0xe6, 0xd6, 0xb4, 0x46, 0x02, 0x00,
+            0x21, 0x01, 0x16, 0x00, 0x00, 0x00, 0x74, 0x2f, 0xe5, 0xa3, 0x01, 0x00, 0x0c, 0x68,
+            0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x66, 0x72, 0x6f, 0x6d, 0x20, 0x78, 0x7a, 0x00, 0x00,
+            0x00, 0x00, 0xa5, 0xb3, 0x18, 0x76, 0x67, 0x14, 0xad, 0x57, 0x00, 0x01, 0x25, 0x0d,
+            0x71, 0x19, 0xc4, 0xb6, 0x1f, 0xb6, 0xf3, 0x7d, 0x01, 0x00, 0x00, 0x00, 0x00, 0x04,
+            0x59, 0x5a,
+        ]
     }
 }

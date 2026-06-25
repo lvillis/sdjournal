@@ -24,7 +24,7 @@ default = ["mmap", "lz4", "zstd"]
 mmap = ["dep:memmap2"]
 lz4 = ["dep:lz4_flex"]
 zstd = ["dep:ruzstd"]
-xz = ["dep:xz2"]
+xz = ["dep:xz4rust"]
 tracing = ["dep:tracing"]
 tokio = ["dep:tokio"]
 verify-seal = ["dep:hmac", "dep:sha2", "dep:num-bigint", "dep:num-traits"]
@@ -37,7 +37,7 @@ siphasher = { version = "1.0.2", default-features = false, features = ["std"] }
 # Optional compression backends for journal DATA payloads.
 lz4_flex = { version = "0.13.0", default-features = false, features = ["std", "safe-decode", "checked-decode"], optional = true }
 ruzstd = { version = "0.8.2", default-features = false, features = ["std"], optional = true }
-xz2 = { version = "0.1.7", default-features = false, features = ["static"], optional = true }
+xz4rust = { version = "0.2.1", default-features = false, features = ["std", "bcj", "crc64", "delta", "sha256", "no_unsafe"], optional = true }
 
 # Optional runtime integrations.
 tokio = { version = "1.52.1", default-features = false, features = ["sync"], optional = true }

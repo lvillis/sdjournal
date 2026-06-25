@@ -15,8 +15,8 @@
 ## Compatibility
 
 - Target OS: **Linux**
-- Non-Linux builds compile, but `Journal::open_default()` is Linux-only
-- CI coverage includes Ubuntu 22.04 (systemd 249.x) and Ubuntu 24.04 (systemd 255.x)
+- Non-Linux builds compile and can parse user-supplied `*.journal` files; `Journal::open_default()` is Linux-only
+- CI coverage includes Ubuntu 22.04 (systemd 249.x), Ubuntu 24.04 (systemd 255.x), and macOS offline checks
 
 ## Install
 
