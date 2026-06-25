@@ -1,9 +1,15 @@
+## [0.1.17] - 2026-06-25
+
+### 🐛 Bug Fixes
+
+- *(xz)* Use pure Rust decoder for portable builds
 ## [0.1.16] - 2026-06-11
 
 ### ⚙️ Miscellaneous Tasks
 
 - *(ci)* Replace third-party workflow actions
 - *(docs)* Improve public API rustdoc
+- *(release)* 0.1.16
 ## [0.1.15] - 2026-04-24
 
 ### ⚡ Performance
