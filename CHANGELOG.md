@@ -1,8 +1,17 @@
+## [0.1.18] - 2026-06-26
+
+### 🐛 Bug Fixes
+
+- *(live)* Skip corrupt journal files while tailing
 ## [0.1.17] - 2026-06-25
 
 ### 🐛 Bug Fixes
 
 - *(xz)* Use pure Rust decoder for portable builds
+
+### ⚙️ Miscellaneous Tasks
+
+- *(release)* 0.1.17
 ## [0.1.16] - 2026-06-11
 
 ### ⚙️ Miscellaneous Tasks
