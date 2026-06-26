@@ -8,7 +8,7 @@ use crate::cursor::{Cursor, SdJournalEntryKey};
 use crate::entry::{EntryOwned, EntryRef, LiveEntry};
 use crate::error::{LimitKind, Result, SdJournalError};
 use crate::file::JournalFile;
-use crate::journal::Journal;
+use crate::journal::{Journal, JournalInner};
 use crate::util::is_ascii_field_name;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -28,6 +28,8 @@ use self::watcher::InotifyWatcher;
 
 #[cfg(all(feature = "tracing", target_os = "linux"))]
 use tracing::debug;
+#[cfg(feature = "tracing")]
+use tracing::warn;
 
 #[derive(Debug, Clone)]
 enum MatchTerm {
@@ -205,6 +207,9 @@ impl FileTailCursor {
 /// subscriptions. Full directory rescans are reserved for topology changes such as file creation,
 /// removal, or rotation.
 ///
+/// Corrupt or transiently unreadable files are skipped when at least one healthy file remains;
+/// enable the `tracing` feature to observe skipped-file diagnostics.
+///
 /// Create it through [`Journal::live`](crate::Journal::live), register one or more
 /// [`LiveSubscription`]s, then drive the engine with [`LiveJournal::poll_once`] or
 /// [`LiveJournal::run`].
@@ -263,6 +268,7 @@ impl LiveJournal {
         let roots = journal.inner.roots.clone();
         let config = journal.inner.config.clone();
         let tracked = build_tracked_files(&journal)?;
+        let journal = journal_from_tracked(&journal, &tracked.files);
 
         let mut out = Self {
             roots,
@@ -318,8 +324,7 @@ impl LiveJournal {
         let needs_replay = options.after_cursor.is_some() || options.since_realtime.is_some();
 
         let snapshot_tail = if needs_replay {
-            self.refresh_snapshot_full()?;
-            let snapshot_tail = tail_entry_key(&self.journal)?;
+            let snapshot_tail = self.refresh_snapshot_full()?;
             self.last_seen = snapshot_tail;
             snapshot_tail
         } else {
@@ -336,9 +341,14 @@ impl LiveJournal {
             }
 
             for item in q.iter()? {
-                let entry = item?;
-                if compiled.matches(&entry) {
-                    let _ = tx.send(Ok(LiveEntry::new(entry)));
+                match item {
+                    Ok(entry) if compiled.matches(&entry) => {
+                        let _ = tx.send(Ok(LiveEntry::new(entry)));
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        warn_live_file_error("skipping live replay entry", &err);
+                    }
                 }
             }
         }
@@ -451,29 +461,37 @@ impl LiveJournal {
         }
     }
 
-    fn refresh_snapshot_full(&mut self) -> Result<()> {
+    fn refresh_snapshot_full(&mut self) -> Result<Option<SdJournalEntryKey>> {
         let journal = Journal::open_dirs_with_config(&self.roots, self.config.clone())?;
         let tracked = build_tracked_files(&journal)?;
-        self.journal = journal;
+        let snapshot_tail = tracked.last_seen;
+        self.journal = journal_from_tracked(&journal, &tracked.files);
         self.tracked_files = tracked.files;
         self.path_index = tracked.path_index;
         self.refresh_fallback_dirs();
         self.refresh_watchers();
-        Ok(())
+        Ok(snapshot_tail)
     }
 
     fn refresh_topology_and_dispatch(&mut self) -> Result<usize> {
         let journal = Journal::open_dirs_with_config(&self.roots, self.config.clone())?;
+        let tracked = build_tracked_files(&journal)?;
+        let journal = journal_from_tracked(&journal, &tracked.files);
+
         let mut pending = Vec::new();
         let mut q = journal.query();
         if let Some(last_seen) = self.last_seen {
             q.after_cursor(cursor_from_key(last_seen));
         }
         for item in q.iter()? {
-            pending.push(item?);
+            match item {
+                Ok(entry) => pending.push(entry),
+                Err(err) => {
+                    warn_live_file_error("skipping live refresh entry", &err);
+                }
+            }
         }
 
-        let tracked = build_tracked_files(&journal)?;
         self.journal = journal;
         self.tracked_files = tracked.files;
         self.path_index = tracked.path_index;
@@ -1036,27 +1054,62 @@ fn collect_fallback_dirs(roots: &[PathBuf], journal: &Journal) -> Vec<FallbackDi
         .collect()
 }
 
+fn journal_from_tracked(journal: &Journal, tracked_files: &[TrackedFile]) -> Journal {
+    Journal {
+        inner: Arc::new(JournalInner {
+            config: journal.inner.config.clone(),
+            roots: journal.inner.roots.clone(),
+            files: tracked_files
+                .iter()
+                .map(|tracked| tracked.file.clone())
+                .collect(),
+        }),
+    }
+}
+
 fn build_tracked_files(journal: &Journal) -> Result<TrackedFiles> {
     let mut tracked_files = Vec::with_capacity(journal.inner.files.len());
     let mut path_index = HashMap::with_capacity(journal.inner.files.len());
     let mut last_seen = None;
+    let mut first_skipped_error = None;
 
     for file in &journal.inner.files {
         let path = file.path().to_path_buf();
-        let tail = FileTailCursor::at_end(file)?;
+        let tail = match FileTailCursor::at_end(file) {
+            Ok(tail) => tail,
+            Err(err) if is_skippable_live_file_error(&err) => {
+                warn_skipped_live_file(file.path(), &err);
+                if first_skipped_error.is_none() {
+                    first_skipped_error = Some(err);
+                }
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
         if let Some(offset) = tail.last_entry_offset {
-            let meta = file.read_entry_meta(offset)?;
-            let key = SdJournalEntryKey {
-                file_id: meta.file_id,
-                entry_offset: meta.entry_offset,
-                seqnum: meta.seqnum,
-                realtime_usec: meta.realtime_usec,
-            };
-            if last_seen
-                .as_ref()
-                .is_none_or(|last| compare_keys(&key, last) == Ordering::Greater)
-            {
-                last_seen = Some(key);
+            match file.read_entry_meta(offset) {
+                Ok(meta) => {
+                    let key = SdJournalEntryKey {
+                        file_id: meta.file_id,
+                        entry_offset: meta.entry_offset,
+                        seqnum: meta.seqnum,
+                        realtime_usec: meta.realtime_usec,
+                    };
+                    if last_seen
+                        .as_ref()
+                        .is_none_or(|last| compare_keys(&key, last) == Ordering::Greater)
+                    {
+                        last_seen = Some(key);
+                    }
+                }
+                Err(err) if is_skippable_live_file_error(&err) => {
+                    warn_skipped_live_file(file.path(), &err);
+                    if first_skipped_error.is_none() {
+                        first_skipped_error = Some(err);
+                    }
+                    continue;
+                }
+                Err(err) => return Err(err),
             }
         }
 
@@ -1070,6 +1123,12 @@ fn build_tracked_files(journal: &Journal) -> Result<TrackedFiles> {
         tracked_files.push(tracked);
     }
 
+    if tracked_files.is_empty()
+        && let Some(err) = first_skipped_error
+    {
+        return Err(err);
+    }
+
     Ok(TrackedFiles {
         files: tracked_files,
         path_index,
@@ -1077,28 +1136,42 @@ fn build_tracked_files(journal: &Journal) -> Result<TrackedFiles> {
     })
 }
 
+fn is_skippable_live_file_error(err: &SdJournalError) -> bool {
+    matches!(
+        err,
+        SdJournalError::Corrupt { .. }
+            | SdJournalError::Transient { .. }
+            | SdJournalError::Io { .. }
+            | SdJournalError::LimitExceeded {
+                kind: LimitKind::ObjectChainSteps,
+                ..
+            }
+    )
+}
+
+fn warn_skipped_live_file(path: &std::path::Path, err: &SdJournalError) {
+    #[cfg(feature = "tracing")]
+    warn!(
+        path = %path.display(),
+        error = %err,
+        "skipping journal file for live tailing"
+    );
+
+    let _ = (path, err);
+}
+
+fn warn_live_file_error(message: &'static str, err: &SdJournalError) {
+    #[cfg(feature = "tracing")]
+    warn!(error = %err, "{message}");
+
+    let _ = (message, err);
+}
+
 fn is_candidate_journal_path(path: &std::path::Path) -> bool {
     matches!(
         path.extension().and_then(|ext| ext.to_str()),
         Some("journal") | Some("journal~")
     )
-}
-
-fn tail_entry_key(journal: &Journal) -> Result<Option<SdJournalEntryKey>> {
-    let mut q = journal.query();
-    q.seek_tail().limit(1);
-    let mut iter = q.iter()?;
-    let Some(item) = iter.next() else {
-        return Ok(None);
-    };
-    let entry = item?;
-    entry
-        .cursor()?
-        .sdjournal_entry_key()
-        .ok_or(SdJournalError::InvalidQuery {
-            reason: "sdjournal-generated entry cursor must contain an entry key".to_string(),
-        })
-        .map(Some)
 }
 
 fn key_from_entry_ref(entry: &EntryRef) -> SdJournalEntryKey {

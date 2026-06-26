@@ -1,6 +1,8 @@
 mod support;
 
 use sdjournal::{Journal, JournalConfig, LiveJournal, LiveSubscription};
+use std::fs;
+use std::path::Path;
 use std::sync::mpsc::TryRecvError;
 use std::thread;
 use std::time::Duration;
@@ -62,11 +64,73 @@ fn shared_live_engine_dispatches_appended_entries_to_matching_subscriptions() {
     assert_subscription_empty(&absent);
 }
 
+#[test]
+fn live_engine_skips_corrupt_tilde_journal_and_tracks_healthy_files() {
+    let initial_units = ["alpha.service"];
+    let layout = SyntheticJournalFile::new(&initial_units);
+    write_corrupt_tilde_journal(layout.root());
+
+    let journal = Journal::open_dir_with_config(layout.root(), live_test_config_with_tilde())
+        .expect("open journal set containing a corrupt tilde file");
+    let mut live = journal
+        .live()
+        .expect("live engine should skip the corrupt tilde file");
+
+    let alpha = subscribe_unit(&mut live, "alpha.service");
+    assert_subscription_empty(&alpha);
+
+    let rewritten_units = ["alpha.service", "alpha.service"];
+    layout.rewrite(&rewritten_units);
+
+    let deliveries = poll_until_delivered(&mut live, 1);
+    assert_eq!(deliveries, 1);
+
+    let alpha_entry = recv_ready(&alpha);
+    assert_entry(
+        &alpha_entry,
+        "alpha.service",
+        &synthetic_message(7, 1, "alpha.service"),
+    );
+}
+
+#[test]
+fn live_engine_fails_when_all_journal_files_are_untrackable() {
+    let layout = SyntheticJournalFile::new(&["alpha.service"]);
+    write_corrupt_tilde_journal(layout.root());
+    fs::remove_file(layout.root().join("synthetic.journal")).expect("remove healthy journal");
+
+    let journal = Journal::open_dir_with_config(layout.root(), live_test_config_with_tilde())
+        .expect("open corrupt journal header");
+
+    match journal.live() {
+        Err(sdjournal::SdJournalError::Corrupt { .. }) => {}
+        Err(sdjournal::SdJournalError::Transient { .. }) => {}
+        Err(err) => panic!("unexpected live error: {err}"),
+        Ok(_) => panic!("expected live engine to fail without any trackable journal files"),
+    }
+}
+
 fn live_test_config() -> JournalConfig {
     JournalConfig {
         poll_interval: Duration::from_millis(10),
         ..JournalConfig::default()
     }
+}
+
+fn live_test_config_with_tilde() -> JournalConfig {
+    JournalConfig {
+        include_journal_tilde: true,
+        ..live_test_config()
+    }
+}
+
+fn write_corrupt_tilde_journal(root: &Path) {
+    let mut bytes = fs::read(root.join("synthetic.journal")).expect("read synthetic journal");
+
+    bytes[24] = bytes[24].wrapping_add(101);
+    bytes[288] = 0;
+
+    fs::write(root.join("corrupt.journal~"), bytes).expect("write corrupt tilde journal");
 }
 
 fn subscribe_unit(live: &mut LiveJournal, unit: &str) -> LiveSubscription {
