@@ -1,8 +1,17 @@
+## [0.1.19] - 2026-06-27
+
+### 🐛 Bug Fixes
+
+- Bound live replay and low-memory query state
 ## [0.1.18] - 2026-06-26
 
 ### 🐛 Bug Fixes
 
 - *(live)* Skip corrupt journal files while tailing
+
+### ⚙️ Miscellaneous Tasks
+
+- *(release)* 0.1.18
 ## [0.1.17] - 2026-06-25
 
 ### 🐛 Bug Fixes
