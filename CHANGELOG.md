@@ -1,8 +1,17 @@
+## [0.1.20] - 2026-06-27
+
+### ⚡ Performance
+
+- *(query)* Prune journal files by entry range
 ## [0.1.19] - 2026-06-27
 
 ### 🐛 Bug Fixes
 
 - Bound live replay and low-memory query state
+
+### ⚙️ Miscellaneous Tasks
+
+- *(release)* 0.1.19
 ## [0.1.18] - 2026-06-26
 
 ### 🐛 Bug Fixes
