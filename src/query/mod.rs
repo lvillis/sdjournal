@@ -504,8 +504,7 @@ mod tests {
             inner: Arc::new(JournalInner {
                 config,
                 roots: Vec::new(),
-                files: Vec::new(),
-                file_paths: Vec::new(),
+                file_infos: Vec::new(),
             }),
         }
     }

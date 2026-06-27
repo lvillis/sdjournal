@@ -71,6 +71,13 @@ pub fn synthetic_message(seed: u8, entry_idx: usize, unit: &str) -> String {
 }
 
 #[allow(dead_code)]
+pub fn synthetic_realtime_usec(seed: u8, entry_idx: usize) -> u64 {
+    1_700_000_000_000_000u64
+        .saturating_add(u64::from(seed) * 10_000)
+        .saturating_add(u64::try_from(entry_idx).expect("entry index fits") * 100)
+}
+
+#[allow(dead_code)]
 pub fn write_synthetic_journal_file<S: AsRef<str>>(path: &Path, units: &[S], seed: u8) {
     let entry_array_capacity = DEFAULT_ENTRY_ARRAY_CAPACITY.max(units.len());
     write_synthetic_journal(path, units, seed, entry_array_capacity);
@@ -133,9 +140,7 @@ fn build_journal_bytes<S: AsRef<str>>(
             current = align8(current + size);
         }
 
-        let realtime_usec = 1_700_000_000_000_000u64
-            .saturating_add(u64::from(seed) * 10_000)
-            .saturating_add(u64::try_from(entry_idx).expect("entry index fits") * 100);
+        let realtime_usec = synthetic_realtime_usec(seed, entry_idx);
         entries.push(EntryPlan {
             seqnum: u64::try_from(entry_idx + 1).expect("entry seqnum fits"),
             realtime_usec,
@@ -197,9 +202,33 @@ fn build_journal_bytes<S: AsRef<str>>(
     );
     put_u64(
         &mut bytes,
+        160,
+        entries.last().map(|entry| entry.seqnum).unwrap_or(0),
+    );
+    put_u64(
+        &mut bytes,
+        168,
+        entries.first().map(|entry| entry.seqnum).unwrap_or(0),
+    );
+    put_u64(
+        &mut bytes,
         176,
         u64::try_from(entry_array_offset).expect("entry array offset fits"),
     );
+    put_u64(
+        &mut bytes,
+        184,
+        entries
+            .first()
+            .map(|entry| entry.realtime_usec)
+            .unwrap_or(0),
+    );
+    put_u64(
+        &mut bytes,
+        192,
+        entries.last().map(|entry| entry.realtime_usec).unwrap_or(0),
+    );
+    put_u64(&mut bytes, 264, entry_offsets.last().copied().unwrap_or(0));
 
     let table_offset = HEADER_SIZE;
     put_u64(

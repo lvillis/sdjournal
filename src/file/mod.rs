@@ -21,7 +21,9 @@ use std::sync::{Arc, Mutex};
 #[cfg(feature = "tracing")]
 use tracing::debug;
 
-pub(crate) use self::iter::{DataEntryOffsetIter, EntryCursorFields, EntryMeta, FileEntryIter};
+pub(crate) use self::iter::{
+    DataEntryOffsetIter, EntryCursorFields, EntryMeta, EntryRange, FileEntryIter,
+};
 
 #[derive(Clone)]
 pub(crate) struct JournalFile {
@@ -160,6 +162,118 @@ impl JournalFile {
 
     pub(crate) fn seqnum_id(&self) -> [u8; 16] {
         self.inner.header.seqnum_id
+    }
+
+    pub(crate) fn entry_range(&self) -> Result<Option<EntryRange>> {
+        if self.inner.header.n_entries == 0 || self.inner.header.entry_array_offset == 0 {
+            return Ok(None);
+        }
+
+        let Some(first) = self.first_entry_meta_from_entry_arrays()? else {
+            return Ok(None);
+        };
+
+        let last = match self.fast_tail_entry_meta() {
+            Ok(Some(meta)) => meta,
+            Ok(None) | Err(_) => match self.last_entry_meta_from_entry_arrays()? {
+                Some(meta) => meta,
+                None => first,
+            },
+        };
+
+        Ok(Some(EntryRange { first, last }))
+    }
+
+    fn first_entry_meta_from_entry_arrays(&self) -> Result<Option<EntryMeta>> {
+        let mut current = self.inner.header.entry_array_offset;
+        let mut steps = 0usize;
+
+        while current != 0 {
+            let items = self.read_entry_array_items(current)?;
+            if let Some(offset) = items.into_iter().find(|offset| *offset != 0) {
+                return Ok(Some(self.read_entry_meta(offset)?));
+            }
+
+            current = self.next_entry_array_offset_checked(current, &mut steps)?;
+        }
+
+        Ok(None)
+    }
+
+    fn last_entry_meta_from_entry_arrays(&self) -> Result<Option<EntryMeta>> {
+        let mut current = self.inner.header.entry_array_offset;
+        let mut last_offset = None;
+        let mut steps = 0usize;
+
+        while current != 0 {
+            let items = self.read_entry_array_items(current)?;
+            if let Some(offset) = items.into_iter().rev().find(|offset| *offset != 0) {
+                last_offset = Some(offset);
+            }
+
+            current = self.next_entry_array_offset_checked(current, &mut steps)?;
+        }
+
+        last_offset
+            .map(|offset| self.read_entry_meta(offset))
+            .transpose()
+    }
+
+    fn next_entry_array_offset_checked(&self, current: u64, steps: &mut usize) -> Result<u64> {
+        let next = self.read_entry_array_next_offset(current)?;
+        *steps = steps.saturating_add(1);
+        if *steps > self.inner.config.max_object_chain_steps {
+            return Err(SdJournalError::LimitExceeded {
+                kind: LimitKind::ObjectChainSteps,
+                limit: u64::try_from(self.inner.config.max_object_chain_steps).unwrap_or(u64::MAX),
+            });
+        }
+        Ok(next)
+    }
+
+    fn fast_tail_entry_meta(&self) -> Result<Option<EntryMeta>> {
+        if let Some(offset) = self
+            .inner
+            .header
+            .tail_entry_offset
+            .filter(|offset| *offset != 0)
+        {
+            let meta = self.read_entry_meta(offset)?;
+            if self.tail_meta_matches_header(meta) {
+                return Ok(Some(meta));
+            }
+        }
+
+        if self.inner.header.tail_object_offset == 0 {
+            return Ok(None);
+        }
+
+        let meta = self.read_entry_meta(self.inner.header.tail_object_offset)?;
+        Ok(self.tail_meta_matches_header(meta).then_some(meta))
+    }
+
+    fn tail_meta_matches_header(&self, meta: EntryMeta) -> bool {
+        if let Some(seqnum) = self
+            .inner
+            .header
+            .tail_entry_seqnum
+            .filter(|seqnum| *seqnum != 0)
+            && meta.seqnum != seqnum
+        {
+            return false;
+        }
+
+        if let Some(realtime_usec) = self
+            .inner
+            .header
+            .tail_entry_realtime
+            .filter(|realtime_usec| *realtime_usec != 0)
+            && meta.realtime_usec != realtime_usec
+        {
+            return false;
+        }
+
+        true
     }
 
     pub(crate) fn live_state(&self) -> LiveFileState {

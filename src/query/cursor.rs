@@ -21,11 +21,14 @@ pub(super) fn build_cursor_key(query: &JournalQuery) -> Result<Option<(EntryMeta
     }
 
     if let Some((file_id, entry_offset)) = cursor.file_offset() {
-        for idx in 0..query.journal.inner.file_paths.len() {
-            let file = query.journal.inner.open_file_by_index(idx)?;
-            if file.file_id() != file_id {
+        for idx in 0..query.journal.inner.file_count() {
+            let Some(info) = query.journal.inner.file_info(idx) else {
+                continue;
+            };
+            if info.file_id != file_id {
                 continue;
             }
+            let file = query.journal.inner.open_file_by_index(idx)?;
             let meta = file
                 .read_entry_meta(entry_offset)
                 .map_err(|_| SdJournalError::NotFound)?;
@@ -71,54 +74,22 @@ fn find_exact_systemd_cursor(
     query: &JournalQuery,
     sys: &crate::cursor::SystemdCursor,
 ) -> Result<Option<EntryMeta>> {
-    let mut candidates: Vec<&crate::file::JournalFile> = Vec::new();
-    if query.journal.inner.is_lazy() {
-        return find_exact_systemd_cursor_lazy(query, sys);
-    }
-
-    if let Some(seqnum_id) = sys.seqnum_id {
-        for f in &query.journal.inner.files {
-            if f.seqnum_id() == seqnum_id {
-                candidates.push(f);
-            }
-        }
-        if candidates.is_empty() {
-            candidates.extend(query.journal.inner.files.iter());
-        }
-    } else {
-        candidates.extend(query.journal.inner.files.iter());
-    }
-
-    let mut first_error: Option<SdJournalError> = None;
-
-    for file in candidates {
-        match find_exact_systemd_cursor_in_file(file, sys) {
-            Ok(Some(meta)) => return Ok(Some(meta)),
-            Ok(None) => {}
-            Err(e) => {
-                if first_error.is_none() {
-                    first_error = Some(e);
-                }
-            }
-        }
-    }
-
-    match first_error {
-        Some(e) => Err(e),
-        None => Ok(None),
-    }
-}
-
-fn find_exact_systemd_cursor_lazy(
-    query: &JournalQuery,
-    sys: &crate::cursor::SystemdCursor,
-) -> Result<Option<EntryMeta>> {
     let mut first_error: Option<SdJournalError> = None;
     let mut fallback_to_all = sys.seqnum_id.is_none();
 
     if let Some(seqnum_id) = sys.seqnum_id {
         let mut matched_seqnum_id = false;
-        for idx in 0..query.journal.inner.file_paths.len() {
+        for idx in 0..query.journal.inner.file_count() {
+            let Some(info) = query.journal.inner.file_info(idx) else {
+                continue;
+            };
+            if info.seqnum_id != seqnum_id {
+                continue;
+            }
+            matched_seqnum_id = true;
+            if !range_may_contain_systemd_cursor(info.entry_range_known, info.entry_range, sys) {
+                continue;
+            }
             let file = match query.journal.inner.open_file_by_index(idx) {
                 Ok(file) => file,
                 Err(err) => {
@@ -128,10 +99,6 @@ fn find_exact_systemd_cursor_lazy(
                     continue;
                 }
             };
-            if file.seqnum_id() != seqnum_id {
-                continue;
-            }
-            matched_seqnum_id = true;
             match find_exact_systemd_cursor_in_file(&file, sys) {
                 Ok(Some(meta)) => return Ok(Some(meta)),
                 Ok(None) => {}
@@ -146,7 +113,13 @@ fn find_exact_systemd_cursor_lazy(
     }
 
     if fallback_to_all {
-        for idx in 0..query.journal.inner.file_paths.len() {
+        for idx in 0..query.journal.inner.file_count() {
+            let Some(info) = query.journal.inner.file_info(idx) else {
+                continue;
+            };
+            if !range_may_contain_systemd_cursor(info.entry_range_known, info.entry_range, sys) {
+                continue;
+            }
             let file = match query.journal.inner.open_file_by_index(idx) {
                 Ok(file) => file,
                 Err(err) => {
@@ -172,6 +145,24 @@ fn find_exact_systemd_cursor_lazy(
         Some(e) => Err(e),
         None => Ok(None),
     }
+}
+
+fn range_may_contain_systemd_cursor(
+    entry_range_known: bool,
+    range: Option<crate::file::EntryRange>,
+    sys: &crate::cursor::SystemdCursor,
+) -> bool {
+    if !entry_range_known {
+        return true;
+    }
+    let Some(realtime_usec) = sys.realtime_usec else {
+        return true;
+    };
+    let Some(range) = range else {
+        return false;
+    };
+
+    range.first.realtime_usec <= realtime_usec && realtime_usec <= range.last.realtime_usec
 }
 
 fn find_exact_systemd_cursor_in_file(

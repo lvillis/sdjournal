@@ -3,9 +3,10 @@ mod support;
 #[cfg(not(target_os = "linux"))]
 use sdjournal::SdJournalError;
 use sdjournal::{Cursor, Journal, MmapPolicy};
+use std::fs;
 use std::path::PathBuf;
 use support::synthetic_journal::{
-    SyntheticJournalFile, synthetic_message, write_synthetic_journal_file,
+    SyntheticJournalFile, synthetic_message, synthetic_realtime_usec, write_synthetic_journal_file,
 };
 
 #[test]
@@ -197,6 +198,76 @@ fn low_memory_query_honors_or_groups_limit_and_reverse_order() {
     assert_eq!(
         field(&reverse_entries[1], "MESSAGE"),
         synthetic_message(9, 0, "gamma.service")
+    );
+}
+
+#[test]
+fn low_memory_query_prunes_files_older_than_since_realtime() {
+    let layout = SyntheticJournalFile::new(&["old.service"]);
+    let old_path = layout.root().join("synthetic.journal");
+    write_synthetic_journal_file(
+        &layout.root().join("recent.journal"),
+        &["recent.service"],
+        9,
+    );
+    let cfg = sdjournal::JournalConfig {
+        max_open_files: 1,
+        mmap_policy: MmapPolicy::Never,
+        ..Default::default()
+    };
+    let journal =
+        Journal::open_dir_with_config(layout.root(), cfg).expect("open low-memory journal");
+
+    fs::remove_file(&old_path).expect("remove old file after discovery");
+
+    let mut query = journal.query();
+    query.since_realtime(synthetic_realtime_usec(9, 0));
+    let entries = query
+        .collect_owned()
+        .expect("old missing file should be pruned before lazy open");
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        field(&entries[0], "MESSAGE"),
+        synthetic_message(9, 0, "recent.service")
+    );
+}
+
+#[test]
+fn low_memory_query_prunes_files_not_newer_than_after_cursor() {
+    let layout = SyntheticJournalFile::new(&["old.service"]);
+    let old_path = layout.root().join("synthetic.journal");
+    write_synthetic_journal_file(
+        &layout.root().join("recent.journal"),
+        &["recent.service"],
+        9,
+    );
+    let cfg = sdjournal::JournalConfig {
+        max_open_files: 1,
+        mmap_policy: MmapPolicy::Never,
+        ..Default::default()
+    };
+    let journal =
+        Journal::open_dir_with_config(layout.root(), cfg).expect("open low-memory journal");
+
+    let mut old_query = journal.query();
+    old_query.match_unit("old.service");
+    let old_entries = old_query.collect_owned().expect("read old cursor");
+    let cursor = Cursor::parse(&old_entries[0].cursor().expect("old cursor").to_string())
+        .expect("parse old cursor");
+
+    fs::remove_file(&old_path).expect("remove old file after cursor capture");
+
+    let mut resumed = journal.query();
+    resumed.after_cursor(cursor);
+    let entries = resumed
+        .collect_owned()
+        .expect("cursor range should prune old missing file");
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        field(&entries[0], "MESSAGE"),
+        synthetic_message(9, 0, "recent.service")
     );
 }
 

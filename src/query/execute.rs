@@ -4,7 +4,7 @@ use crate::cursor::Cursor;
 use crate::entry::EntryRef;
 use crate::error::{Result, SdJournalError};
 use crate::file::{DataEntryOffsetIter, EntryMeta, FileEntryIter};
-use crate::journal::journal_from_open_files;
+use crate::journal::{JournalFileInfo, journal_from_open_files};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
@@ -653,12 +653,15 @@ pub(super) struct EagerJournalIter {
 #[derive(Clone, Copy)]
 struct HeapItem {
     meta: EntryMeta,
+    iter_idx: usize,
     file_idx: usize,
 }
 
 impl PartialEq for HeapItem {
     fn eq(&self, other: &Self) -> bool {
-        self.meta == other.meta && self.file_idx == other.file_idx
+        self.meta == other.meta
+            && self.iter_idx == other.iter_idx
+            && self.file_idx == other.file_idx
     }
 }
 
@@ -676,6 +679,57 @@ impl Ord for HeapItem {
             .cmp_key(&other.meta)
             .then_with(|| self.file_idx.cmp(&other.file_idx))
     }
+}
+
+fn matching_file_indexes(
+    query: &JournalQuery,
+    cursor_key: Option<(EntryMeta, bool)>,
+) -> Vec<usize> {
+    (0..query.journal.inner.file_count())
+        .filter(|idx| {
+            let Some(info) = query.journal.inner.file_info(*idx) else {
+                return false;
+            };
+            info_may_match_query(query, cursor_key, info)
+        })
+        .collect()
+}
+
+fn info_may_match_query(
+    query: &JournalQuery,
+    cursor_key: Option<(EntryMeta, bool)>,
+    info: &JournalFileInfo,
+) -> bool {
+    if !info.entry_range_known {
+        return true;
+    }
+
+    let Some(range) = info.entry_range else {
+        return false;
+    };
+
+    if let Some(since) = query.since_realtime
+        && range.last.realtime_usec < since
+    {
+        return false;
+    }
+    if let Some(until) = query.until_realtime
+        && range.first.realtime_usec > until
+    {
+        return false;
+    }
+    if let Some((cursor, inclusive)) = cursor_key {
+        let ord = range.last.cmp_key(&cursor);
+        if inclusive {
+            if ord == std::cmp::Ordering::Less {
+                return false;
+            }
+        } else if ord != std::cmp::Ordering::Greater {
+            return false;
+        }
+    }
+
+    true
 }
 
 impl EagerJournalIter {
@@ -697,13 +751,22 @@ impl EagerJournalIter {
         let mut pending_errors = Vec::new();
         let cursor_key = build_cursor_key(&query)?;
         let branches = build_branches(&query);
+        let file_indexes = matching_file_indexes(&query, cursor_key);
 
-        let mut iters = Vec::with_capacity(query.journal.inner.files.len());
-        for f in &query.journal.inner.files {
+        let mut iters = Vec::with_capacity(file_indexes.len());
+        let mut iter_file_indexes = Vec::with_capacity(file_indexes.len());
+        for file_idx in file_indexes.iter().copied() {
+            let file = match query.journal.inner.open_file_by_index(file_idx) {
+                Ok(file) => file,
+                Err(e) => {
+                    pending_errors.push(e);
+                    continue;
+                }
+            };
             let mut branch_iters = Vec::with_capacity(branches.len());
             for terms in &branches {
                 match FileBranchIter::new(
-                    f.clone(),
+                    file.clone(),
                     terms.clone(),
                     query.reverse,
                     query.since_realtime,
@@ -714,6 +777,7 @@ impl EagerJournalIter {
                 }
             }
             iters.push(FileMetaIter::from_branch_iters(branch_iters, query.reverse));
+            iter_file_indexes.push(file_idx);
         }
 
         let mut forward_heap: BinaryHeap<Reverse<HeapItem>> = BinaryHeap::new();
@@ -723,7 +787,8 @@ impl EagerJournalIter {
             if let Some(meta) = next_ok_meta(it, &mut pending_errors) {
                 let item = HeapItem {
                     meta,
-                    file_idx: idx,
+                    iter_idx: idx,
+                    file_idx: iter_file_indexes[idx],
                 };
                 if query.reverse {
                     reverse_heap.push(item);
@@ -818,10 +883,11 @@ impl Iterator for EagerJournalIter {
             };
 
             if let Some(next_meta) =
-                next_ok_meta(&mut self.iters[item.file_idx], &mut self.pending_errors)
+                next_ok_meta(&mut self.iters[item.iter_idx], &mut self.pending_errors)
             {
                 self.push_next(HeapItem {
                     meta: next_meta,
+                    iter_idx: item.iter_idx,
                     file_idx: item.file_idx,
                 });
             }
@@ -834,7 +900,16 @@ impl Iterator for EagerJournalIter {
                 continue;
             }
 
-            let file = &self.query.journal.inner.files[item.file_idx];
+            let file = match self.query.journal.inner.open_file_by_index(item.file_idx) {
+                Ok(file) => file,
+                Err(e) => {
+                    self.pending_errors.push(e);
+                    if let Some(err) = self.pending_errors.pop() {
+                        return Some(Err(err));
+                    }
+                    continue;
+                }
+            };
             let entry = match file.read_entry_ref(item.meta.entry_offset) {
                 Ok(e) => e,
                 Err(e) => {
@@ -997,8 +1072,9 @@ impl LazyJournalIter {
         let mut forward_heap = BinaryHeap::new();
         let mut reverse_heap = BinaryHeap::new();
         let mut cache = LazyFileCache::new(query.journal.inner.config.max_open_files);
+        let file_indexes = matching_file_indexes(&query, cursor_key);
 
-        for file_idx in 0..query.journal.inner.file_paths.len() {
+        for file_idx in file_indexes {
             match cache.next_entry(&query, file_idx, cursor_key, None) {
                 Ok(Some(entry)) => {
                     let item = LazyHeapItem {
@@ -1110,7 +1186,7 @@ fn build_lazy_file_iter(
     after_meta: Option<EntryMeta>,
 ) -> Result<EagerJournalIter> {
     let file = query.journal.inner.open_file_by_index(file_idx)?;
-    let journal = journal_from_open_files(query.journal.inner.config.clone(), vec![file]);
+    let journal = journal_from_open_files(query.journal.inner.config.clone(), vec![file])?;
     let mut q = query.clone();
     q.journal = journal;
     q.limit = None;

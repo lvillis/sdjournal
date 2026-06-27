@@ -1,7 +1,7 @@
 use crate::config::JournalConfig;
 use crate::cursor::Cursor;
 use crate::error::{LimitKind, Result, SdJournalError};
-use crate::file::JournalFile;
+use crate::file::{EntryRange, JournalFile};
 use crate::live::LiveJournal;
 use crate::query::JournalQuery;
 use std::collections::HashSet;
@@ -23,8 +23,17 @@ pub struct Journal {
 pub(crate) struct JournalInner {
     pub(crate) config: JournalConfig,
     pub(crate) roots: Vec<PathBuf>,
-    pub(crate) files: Vec<JournalFile>,
-    pub(crate) file_paths: Vec<PathBuf>,
+    pub(crate) file_infos: Vec<JournalFileInfo>,
+}
+
+#[derive(Clone)]
+pub(crate) struct JournalFileInfo {
+    pub(crate) path: PathBuf,
+    pub(crate) file_id: [u8; 16],
+    pub(crate) seqnum_id: [u8; 16],
+    pub(crate) entry_range: Option<EntryRange>,
+    pub(crate) entry_range_known: bool,
+    file: Option<JournalFile>,
 }
 
 pub(crate) struct JournalDiscovery {
@@ -108,8 +117,8 @@ impl Journal {
 
         #[cfg(feature = "tracing")]
         debug!(
-            n_files = file_set.file_paths.len(),
-            lazy = file_set.files.is_empty(),
+            n_files = file_set.file_infos.len(),
+            lazy = file_set.file_infos.iter().any(|info| info.file.is_none()),
             "journal opened"
         );
 
@@ -117,8 +126,7 @@ impl Journal {
             inner: Arc::new(JournalInner {
                 config,
                 roots: discovery.roots,
-                files: file_set.files,
-                file_paths: file_set.file_paths,
+                file_infos: file_set.file_infos,
             }),
         })
     }
@@ -156,7 +164,7 @@ impl Journal {
         let key = crate::seal::parse_verification_key(verification_key)?;
         let params = crate::seal::FsprgParams::new(key.seed())?;
 
-        for idx in 0..self.inner.file_paths.len() {
+        for idx in 0..self.inner.file_count() {
             let f = self.inner.open_file_by_index(idx)?;
             crate::seal::verify_file_seal(&f, &params)?;
         }
@@ -165,21 +173,65 @@ impl Journal {
 }
 
 pub(crate) struct JournalFileSet {
-    pub(crate) files: Vec<JournalFile>,
-    pub(crate) file_paths: Vec<PathBuf>,
+    pub(crate) file_infos: Vec<JournalFileInfo>,
 }
 
 impl JournalInner {
     pub(crate) fn is_lazy(&self) -> bool {
-        self.files.is_empty() && !self.file_paths.is_empty()
+        self.file_infos.iter().any(|info| info.file.is_none())
+    }
+
+    pub(crate) fn file_count(&self) -> usize {
+        self.file_infos.len()
+    }
+
+    pub(crate) fn file_info(&self, idx: usize) -> Option<&JournalFileInfo> {
+        self.file_infos.get(idx)
+    }
+
+    pub(crate) fn file_paths(&self) -> Vec<PathBuf> {
+        self.file_infos
+            .iter()
+            .map(|info| info.path.clone())
+            .collect()
+    }
+
+    pub(crate) fn opened_files(&self) -> Option<Vec<JournalFile>> {
+        if self.is_lazy() {
+            return None;
+        }
+        self.file_infos
+            .iter()
+            .map(|info| info.file.clone())
+            .collect()
     }
 
     pub(crate) fn open_file_by_index(&self, idx: usize) -> Result<JournalFile> {
-        if let Some(file) = self.files.get(idx) {
+        let info = self.file_infos.get(idx).ok_or(SdJournalError::NotFound)?;
+        if let Some(file) = &info.file {
             return Ok(file.clone());
         }
-        let path = self.file_paths.get(idx).ok_or(SdJournalError::NotFound)?;
-        JournalFile::open(path.clone(), &self.config)
+        JournalFile::open(info.path.clone(), &self.config)
+    }
+}
+
+impl JournalFileInfo {
+    fn from_open_file(file: JournalFile, keep_open: bool) -> Self {
+        let path = file.path().to_path_buf();
+        let file_id = file.file_id();
+        let seqnum_id = file.seqnum_id();
+        let entry_range_result = file.entry_range();
+        let entry_range_known = entry_range_result.is_ok();
+        let entry_range = entry_range_result.ok().flatten();
+
+        Self {
+            path,
+            file_id,
+            seqnum_id,
+            entry_range,
+            entry_range_known,
+            file: keep_open.then_some(file),
+        }
     }
 }
 
@@ -194,22 +246,27 @@ pub(crate) fn journal_from_file_paths(
         inner: Arc::new(JournalInner {
             config,
             roots,
-            files: file_set.files,
-            file_paths: file_set.file_paths,
+            file_infos: file_set.file_infos,
         }),
     })
 }
 
-pub(crate) fn journal_from_open_files(config: JournalConfig, files: Vec<JournalFile>) -> Journal {
-    let file_paths = files.iter().map(|file| file.path().to_path_buf()).collect();
-    Journal {
+pub(crate) fn journal_from_open_files(
+    config: JournalConfig,
+    files: Vec<JournalFile>,
+) -> Result<Journal> {
+    validate_journal_config(&config)?;
+    let file_infos = files
+        .into_iter()
+        .map(|file| JournalFileInfo::from_open_file(file, true))
+        .collect();
+    Ok(Journal {
         inner: Arc::new(JournalInner {
             config,
             roots: Vec::new(),
-            files,
-            file_paths,
+            file_infos,
         }),
-    }
+    })
 }
 
 fn validate_journal_config(config: &JournalConfig) -> Result<()> {
@@ -230,14 +287,18 @@ fn open_journal_file_set(paths: Vec<PathBuf>, config: &JournalConfig) -> Result<
 }
 
 fn open_eager_file_set(paths: Vec<PathBuf>, config: &JournalConfig) -> Result<JournalFileSet> {
-    let mut files = Vec::new();
+    let mut file_infos = Vec::new();
     let mut errors = Vec::new();
+    let mut seen: HashSet<[u8; 16]> = HashSet::new();
     for path in paths {
         match JournalFile::open(path, config) {
             Ok(f) => {
                 #[cfg(feature = "tracing")]
                 debug!(path = %f.path().display(), "opened journal file");
-                files.push(f)
+                let info = JournalFileInfo::from_open_file(f, true);
+                if seen.insert(info.file_id) {
+                    file_infos.push(info);
+                }
             }
             Err(e) => {
                 #[cfg(feature = "tracing")]
@@ -247,30 +308,27 @@ fn open_eager_file_set(paths: Vec<PathBuf>, config: &JournalConfig) -> Result<Jo
         }
     }
 
-    if files.is_empty() {
+    if file_infos.is_empty() {
         return Err(errors
             .into_iter()
             .next()
             .unwrap_or(SdJournalError::NotFound));
     }
 
-    let mut seen: HashSet<[u8; 16]> = HashSet::new();
-    files.retain(|f| seen.insert(f.file_id()));
-    let file_paths = files.iter().map(|file| file.path().to_path_buf()).collect();
-
-    Ok(JournalFileSet { files, file_paths })
+    Ok(JournalFileSet { file_infos })
 }
 
 fn open_lazy_file_set(paths: Vec<PathBuf>, config: &JournalConfig) -> Result<JournalFileSet> {
-    let mut file_paths = Vec::new();
+    let mut file_infos = Vec::new();
     let mut errors = Vec::new();
     let mut seen: HashSet<[u8; 16]> = HashSet::new();
 
     for path in paths {
         match JournalFile::open(path.clone(), config) {
             Ok(file) => {
-                if seen.insert(file.file_id()) {
-                    file_paths.push(path);
+                let info = JournalFileInfo::from_open_file(file, false);
+                if seen.insert(info.file_id) {
+                    file_infos.push(info);
                 }
             }
             Err(e) => {
@@ -281,17 +339,14 @@ fn open_lazy_file_set(paths: Vec<PathBuf>, config: &JournalConfig) -> Result<Jou
         }
     }
 
-    if file_paths.is_empty() {
+    if file_infos.is_empty() {
         return Err(errors
             .into_iter()
             .next()
             .unwrap_or(SdJournalError::NotFound));
     }
 
-    Ok(JournalFileSet {
-        files: Vec::new(),
-        file_paths,
-    })
+    Ok(JournalFileSet { file_infos })
 }
 
 pub(crate) fn discover_journal_candidates(

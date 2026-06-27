@@ -1,5 +1,5 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use sdjournal::{Journal, JournalConfig, JournalQuery, LiveJournal, LiveSubscription};
+use sdjournal::{Journal, JournalConfig, JournalQuery, LiveJournal, LiveSubscription, MmapPolicy};
 use std::fs::{self, create_dir_all};
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
@@ -14,7 +14,10 @@ const ENTRY_OBJECT_HEADER_SIZE: usize = 64;
 const ENTRY_ITEM_SIZE: usize = 16;
 const MACHINE_ID_DIR: &str = "0123456789abcdef0123456789abcdef";
 const FILES_PER_DIR: usize = 2;
+const PRUNING_OLD_FILES: usize = 24;
 const UNIT_FIELDS: [&str; 3] = ["_SYSTEMD_UNIT", "UNIT", "OBJECT_SYSTEMD_UNIT"];
+const PRUNING_OLD_UNIT: &str = "bench-old.service";
+const PRUNING_RECENT_UNIT: &str = "bench-recent.service";
 const BENCH_UNITS: [&str; 8] = [
     "bench-a.service",
     "bench-b.service",
@@ -49,6 +52,11 @@ struct DataPlan {
 struct SyntheticJournalLayout {
     root: TempDir,
     files_per_dir: usize,
+}
+
+struct PruningQueryLayout {
+    root: TempDir,
+    recent_seed: u8,
 }
 
 impl SyntheticJournalLayout {
@@ -101,10 +109,49 @@ impl SyntheticJournalLayout {
     }
 }
 
+impl PruningQueryLayout {
+    fn new() -> Self {
+        let root = tempfile::tempdir().expect("create pruning benchmark root");
+        for idx in 0..PRUNING_OLD_FILES {
+            let seed = u8::try_from(idx + 1).expect("old file seed fits in u8");
+            write_synthetic_journal(
+                &root.path().join(format!("old-{idx}.journal")),
+                &[PRUNING_OLD_UNIT],
+                seed,
+            );
+        }
+
+        let recent_seed = 200;
+        write_synthetic_journal(
+            &root.path().join("recent.journal"),
+            &[PRUNING_RECENT_UNIT],
+            recent_seed,
+        );
+
+        Self { root, recent_seed }
+    }
+
+    fn root(&self) -> &Path {
+        self.root.path()
+    }
+
+    fn recent_since_realtime(&self) -> u64 {
+        synthetic_realtime_usec(self.recent_seed, 0)
+    }
+}
+
 fn benchmark_config() -> JournalConfig {
     JournalConfig {
         poll_interval: Duration::ZERO,
         ..JournalConfig::default()
+    }
+}
+
+fn low_memory_benchmark_config() -> JournalConfig {
+    JournalConfig {
+        max_open_files: 1,
+        mmap_policy: MmapPolicy::Never,
+        ..benchmark_config()
     }
 }
 
@@ -213,6 +260,24 @@ fn benchmark_query_perf(c: &mut Criterion) {
             let count = build_multi_unit_exact_query(&journal, &BENCH_UNITS[..4])
                 .collect_owned()
                 .expect("combined unit query should succeed")
+                .len();
+            black_box(count)
+        });
+    });
+
+    let pruning_layout = PruningQueryLayout::new();
+    let pruning_journal =
+        Journal::open_dir_with_config(pruning_layout.root(), low_memory_benchmark_config())
+            .expect("open pruning benchmark journal");
+    group.bench_function("many_old_files_since_realtime_pruned", |b| {
+        b.iter(|| {
+            let mut query = pruning_journal.query();
+            query
+                .since_realtime(pruning_layout.recent_since_realtime())
+                .match_unit(PRUNING_RECENT_UNIT);
+            let count = query
+                .collect_owned()
+                .expect("pruned recent query should succeed")
                 .len();
             black_box(count)
         });
@@ -517,9 +582,7 @@ fn build_journal_bytes<S: AsRef<str>>(units: &[S], seed: u8) -> Vec<u8> {
             current = align8(current + size);
         }
 
-        let realtime_usec = 1_700_000_000_000_000u64
-            .saturating_add(u64::from(seed) * 10_000)
-            .saturating_add(u64::try_from(entry_idx).expect("entry index fits") * 100);
+        let realtime_usec = synthetic_realtime_usec(seed, entry_idx);
         entries.push(EntryPlan {
             seqnum: u64::try_from(entry_idx + 1).expect("entry seqnum fits"),
             realtime_usec,
@@ -657,6 +720,12 @@ fn build_journal_bytes<S: AsRef<str>>(units: &[S], seed: u8) -> Vec<u8> {
     }
 
     bytes
+}
+
+fn synthetic_realtime_usec(seed: u8, entry_idx: usize) -> u64 {
+    1_700_000_000_000_000u64
+        .saturating_add(u64::from(seed) * 10_000)
+        .saturating_add(u64::try_from(entry_idx).expect("entry index fits") * 100)
 }
 
 fn align8(value: usize) -> usize {

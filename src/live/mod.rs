@@ -145,10 +145,12 @@ impl LiveJournal {
         let roots = journal.inner.roots.clone();
         let config = journal.inner.config.clone();
         validate_live_config(&config)?;
-        let tracked = if journal.inner.is_lazy() {
-            build_tracked_files_from_paths(&journal.inner.file_paths, &config)?
-        } else {
-            build_tracked_files_from_open_files(&journal.inner.files)?
+        let tracked = match journal.inner.opened_files() {
+            Some(files) => build_tracked_files_from_open_files(&files)?,
+            None => {
+                let paths = journal.inner.file_paths();
+                build_tracked_files_from_paths(&paths, &config)?
+            }
         };
 
         let mut out = Self {

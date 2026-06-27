@@ -159,6 +159,14 @@ impl EntryMeta {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EntryRange {
+    /// Earliest entry in the file-level journal entry array.
+    pub(crate) first: EntryMeta,
+    /// Latest entry in the file-level journal entry array.
+    pub(crate) last: EntryMeta,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EntryCursorFields {
     pub(crate) seqnum: u64,

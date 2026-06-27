@@ -63,7 +63,12 @@ pub(crate) struct Header {
     pub(crate) field_hash_table_size: u64,
     pub(crate) tail_object_offset: u64,
     pub(crate) n_entries: u64,
+    pub(crate) tail_entry_seqnum: Option<u64>,
+    pub(crate) head_entry_seqnum: Option<u64>,
     pub(crate) entry_array_offset: u64,
+    pub(crate) head_entry_realtime: Option<u64>,
+    pub(crate) tail_entry_realtime: Option<u64>,
+    pub(crate) tail_entry_offset: Option<u64>,
 }
 
 impl Header {
@@ -180,6 +185,11 @@ impl Header {
             offset: Some(176),
             reason: "missing entry_array_offset".to_string(),
         })?;
+        let tail_entry_seqnum = read_u64_le(buf, 160);
+        let head_entry_seqnum = read_u64_le(buf, 168);
+        let head_entry_realtime = read_u64_le(buf, 184);
+        let tail_entry_realtime = read_u64_le(buf, 192);
+        let tail_entry_offset = read_u64_le(buf, 264);
 
         Ok(Self {
             compatible_flags,
@@ -197,7 +207,12 @@ impl Header {
             field_hash_table_size,
             tail_object_offset,
             n_entries,
+            tail_entry_seqnum,
+            head_entry_seqnum,
             entry_array_offset,
+            head_entry_realtime,
+            tail_entry_realtime,
+            tail_entry_offset,
         })
     }
 
@@ -418,6 +433,26 @@ mod tests {
             assert!(header.is_sealed());
             assert!(header.is_sealed_continuous());
         }
+    }
+
+    #[test]
+    fn header_parse_reads_modern_entry_cutoff_fields() {
+        let mut buf = sample_header_bytes(0, 0);
+        buf.resize(272, 0);
+        buf[88..96].copy_from_slice(&272u64.to_le_bytes());
+        buf[160..168].copy_from_slice(&99u64.to_le_bytes());
+        buf[168..176].copy_from_slice(&42u64.to_le_bytes());
+        buf[184..192].copy_from_slice(&1_700_000_000_000_000u64.to_le_bytes());
+        buf[192..200].copy_from_slice(&1_700_000_000_000_500u64.to_le_bytes());
+        buf[264..272].copy_from_slice(&4096u64.to_le_bytes());
+
+        let header = Header::parse(&buf, Path::new("dummy")).unwrap();
+
+        assert_eq!(header.tail_entry_seqnum, Some(99));
+        assert_eq!(header.head_entry_seqnum, Some(42));
+        assert_eq!(header.head_entry_realtime, Some(1_700_000_000_000_000));
+        assert_eq!(header.tail_entry_realtime, Some(1_700_000_000_000_500));
+        assert_eq!(header.tail_entry_offset, Some(4096));
     }
 
     #[test]
