@@ -1,26 +1,40 @@
+mod filter;
+mod replay;
+mod tail;
 #[cfg(feature = "tokio")]
 mod tokio;
 #[cfg(target_os = "linux")]
 mod watcher;
 
-use crate::config::JournalConfig;
+use crate::config::{JournalConfig, LiveQueueFullPolicy};
 use crate::cursor::{Cursor, SdJournalEntryKey};
-use crate::entry::{EntryOwned, EntryRef, LiveEntry};
+use crate::entry::{EntryRef, LiveEntry};
 use crate::error::{LimitKind, Result, SdJournalError};
 use crate::file::JournalFile;
-use crate::journal::{Journal, JournalInner};
-use crate::util::is_ascii_field_name;
+use crate::journal::{Journal, discover_journal_candidates};
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering as AtomicOrdering},
 };
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
+use self::filter::CompiledFilter;
+pub use self::filter::{LiveFilter, LiveOrGroupBuilder};
+use self::replay::{
+    JournalSnapshot, PendingTopologyCatchup, ReplayState, collect_entries_after_key,
+    collect_replay_batch,
+};
+#[cfg(target_os = "linux")]
+use self::tail::collect_watch_paths;
+use self::tail::{
+    FallbackDirState, TrackedFile, build_live_snapshot, build_tracked_files_from_open_files,
+    build_tracked_files_from_paths, collect_fallback_dirs,
+};
 #[cfg(feature = "tokio")]
 pub use self::tokio::TokioSubscription;
 #[cfg(target_os = "linux")]
@@ -31,57 +45,12 @@ use tracing::debug;
 #[cfg(feature = "tracing")]
 use tracing::warn;
 
-#[derive(Debug, Clone)]
-enum MatchTerm {
-    Exact { field: String, value: Vec<u8> },
-    Present { field: String },
-}
-
-#[derive(Debug, Clone)]
-struct CompiledFilter {
-    branches: Vec<Vec<MatchTerm>>,
-}
-
-impl CompiledFilter {
-    fn matches<E: MatchableEntry>(&self, entry: &E) -> bool {
-        self.branches
-            .iter()
-            .any(|branch| branch.iter().all(|term| term_matches(entry, term)))
-    }
-}
-
-trait MatchableEntry {
-    fn get_field(&self, field: &str) -> Option<&[u8]>;
-    fn any_field_equals(&self, field: &str, value: &[u8]) -> bool;
-}
-
-impl MatchableEntry for EntryOwned {
-    fn get_field(&self, field: &str) -> Option<&[u8]> {
-        self.get(field)
-    }
-
-    fn any_field_equals(&self, field: &str, value: &[u8]) -> bool {
-        self.iter_fields()
-            .any(|(name, field_value)| name == field && field_value == value)
-    }
-}
-
-impl MatchableEntry for EntryRef {
-    fn get_field(&self, field: &str) -> Option<&[u8]> {
-        self.get(field)
-    }
-
-    fn any_field_equals(&self, field: &str, value: &[u8]) -> bool {
-        self.iter_fields()
-            .any(|(name, field_value)| name == field && field_value == value)
-    }
-}
-
 struct SubscriptionState {
     filter: CompiledFilter,
-    tx: Sender<Result<LiveEntry>>,
+    tx: SyncSender<Result<LiveEntry>>,
     start_after: Option<SdJournalEntryKey>,
     alive: Arc<AtomicBool>,
+    replay: Option<ReplayState>,
 }
 
 pub(super) struct WatchChange {
@@ -95,117 +64,23 @@ impl WatchChange {
     }
 }
 
-struct TrackedFile {
-    path: PathBuf,
-    file_id: [u8; 16],
-    file: JournalFile,
-    tail: FileTailCursor,
-}
-
-struct TrackedFiles {
-    files: Vec<TrackedFile>,
-    path_index: HashMap<PathBuf, usize>,
-    last_seen: Option<SdJournalEntryKey>,
-}
-
-struct FallbackDirState {
-    path: PathBuf,
-    modified: Option<SystemTime>,
-}
-
-struct FileTailCursor {
-    known_arrays: Vec<u64>,
-    next_array_idx: usize,
-    next_item_idx: usize,
-    last_entry_offset: Option<u64>,
-}
-
-impl FileTailCursor {
-    fn at_end(file: &JournalFile) -> Result<Self> {
-        let known_arrays = file.entry_array_offsets()?;
-        let (next_array_idx, next_item_idx, last_entry_offset) = match known_arrays.last().copied()
-        {
-            Some(last) => {
-                let items = file.read_entry_array_items(last)?;
-                (known_arrays.len() - 1, items.len(), items.last().copied())
-            }
-            None => (0, 0, None),
-        };
-
-        Ok(Self {
-            known_arrays,
-            next_array_idx,
-            next_item_idx,
-            last_entry_offset,
-        })
-    }
-
-    fn drain_new_offsets(&mut self, file: &JournalFile) -> Result<Vec<u64>> {
-        if self.known_arrays.is_empty() {
-            self.known_arrays = file.entry_array_offsets()?;
-        } else {
-            let mut next =
-                file.read_entry_array_next_offset(*self.known_arrays.last().unwrap_or(&0))?;
-            let mut steps = 0usize;
-            while next != 0 {
-                self.known_arrays.push(next);
-                next = file.read_entry_array_next_offset(next)?;
-                steps = steps.saturating_add(1);
-                if steps > file.max_object_chain_steps() {
-                    return Err(SdJournalError::Transient {
-                        path: Some(file.path().to_path_buf()),
-                        reason: "entry array chain refresh exceeded expected growth".to_string(),
-                    });
-                }
-            }
-        }
-
-        if self.known_arrays.is_empty() {
-            self.known_arrays.clear();
-            self.next_array_idx = 0;
-            self.next_item_idx = 0;
-            self.last_entry_offset = None;
-            return Ok(Vec::new());
-        }
-
-        let start_idx = self.next_array_idx.min(self.known_arrays.len() - 1);
-        let mut out = Vec::new();
-        let mut last_len = 0usize;
-
-        for (idx, array_offset) in self
-            .known_arrays
-            .iter()
-            .copied()
-            .enumerate()
-            .skip(start_idx)
-        {
-            let items = file.read_entry_array_items(array_offset)?;
-            let start = if idx == start_idx {
-                self.next_item_idx.min(items.len())
-            } else {
-                0
-            };
-            out.extend(items[start..].iter().copied().filter(|offset| *offset != 0));
-            if idx + 1 == self.known_arrays.len() {
-                last_len = items.len();
-            }
-        }
-
-        self.next_array_idx = self.known_arrays.len() - 1;
-        self.next_item_idx = last_len;
-        if let Some(last) = out.last().copied() {
-            self.last_entry_offset = Some(last);
-        }
-        Ok(out)
-    }
+enum SendOutcome {
+    Delivered,
+    Dropped,
+    Closed,
 }
 
 /// Shared live journal engine for multi-subscription tailing.
 ///
-/// `LiveJournal` keeps one watcher plus persistent per-file tail state. Ordinary appends are read
-/// incrementally from already-known journal files and dispatched once to all matching
-/// subscriptions. Full directory rescans are reserved for topology changes such as file creation,
-/// removal, or rotation.
+/// `LiveJournal` keeps one watcher plus lightweight per-file tail checkpoints. Ordinary appends
+/// open only the modified journal file, read newly appended entries, update the checkpoint, and
+/// dispatch each entry once to all matching subscriptions. Full directory rescans are reserved for
+/// topology changes such as file creation, removal, or rotation.
+///
+/// Live delivery is bounded by [`JournalConfig::live_channel_capacity`],
+/// [`JournalConfig::max_live_batch_entries`], and [`JournalConfig::max_live_replay_entries`].
+/// The default queue-full behavior is [`LiveQueueFullPolicy::Block`], which applies backpressure
+/// instead of silently dropping entries.
 ///
 /// Corrupt or transiently unreadable files are skipped when at least one healthy file remains;
 /// enable the `tracing` feature to observe skipped-file diagnostics.
@@ -218,17 +93,17 @@ impl FileTailCursor {
 ///
 /// Subscriptions are passive receivers. The engine only observes new journal data while
 /// [`LiveJournal::poll_once`] or [`LiveJournal::run`] is being called. A subscription created with
-/// [`LiveJournal::subscribe`] is live-only: it starts after the current tail and does not replay
-/// existing entries. Use [`SubscriptionOptions`] when a replay window is needed.
+/// [`LiveJournal::subscribe`] is live-only: it starts after the engine's current tail checkpoint
+/// and does not replay existing entries. Use [`SubscriptionOptions`] when a replay window is
+/// needed.
 ///
 /// # Example
 ///
 /// ```no_run
-/// use sdjournal::Journal;
+/// use sdjournal::LiveJournal;
 /// use std::thread;
 ///
-/// let journal = Journal::open_default()?;
-/// let mut live = journal.live()?;
+/// let mut live = LiveJournal::open_default()?;
 ///
 /// let mut sshd_filter = live.filter();
 /// sshd_filter.match_unit("sshd.service");
@@ -251,12 +126,14 @@ impl FileTailCursor {
 pub struct LiveJournal {
     roots: Vec<PathBuf>,
     config: JournalConfig,
-    journal: Journal,
     tracked_files: Vec<TrackedFile>,
     path_index: HashMap<PathBuf, usize>,
     fallback_dirs: Vec<FallbackDirState>,
     subscriptions: Vec<SubscriptionState>,
     last_seen: Option<SdJournalEntryKey>,
+    pending_modified_paths: Vec<PathBuf>,
+    pending_topology: Option<PendingTopologyCatchup>,
+    next_replay_index: usize,
     #[cfg(target_os = "linux")]
     inotify: Option<InotifyWatcher>,
     #[cfg(target_os = "linux")]
@@ -267,18 +144,104 @@ impl LiveJournal {
     pub(crate) fn from_journal(journal: Journal) -> Result<Self> {
         let roots = journal.inner.roots.clone();
         let config = journal.inner.config.clone();
-        let tracked = build_tracked_files(&journal)?;
-        let journal = journal_from_tracked(&journal, &tracked.files);
+        validate_live_config(&config)?;
+        let tracked = if journal.inner.is_lazy() {
+            build_tracked_files_from_paths(&journal.inner.file_paths, &config)?
+        } else {
+            build_tracked_files_from_open_files(&journal.inner.files)?
+        };
 
         let mut out = Self {
             roots,
             config,
-            journal,
             tracked_files: tracked.files,
             path_index: tracked.path_index,
             fallback_dirs: Vec::new(),
             subscriptions: Vec::new(),
             last_seen: tracked.last_seen,
+            pending_modified_paths: Vec::new(),
+            pending_topology: None,
+            next_replay_index: 0,
+            #[cfg(target_os = "linux")]
+            inotify: None,
+            #[cfg(target_os = "linux")]
+            watch_paths: Vec::new(),
+        };
+        out.refresh_fallback_dirs();
+        out.refresh_watchers();
+        Ok(out)
+    }
+
+    /// Create a live engine from the default system journal roots on Linux.
+    ///
+    /// This avoids opening a historical [`Journal`] first. Prefer this constructor when the
+    /// application only needs live tailing.
+    ///
+    /// On non-Linux targets this returns [`SdJournalError::Unsupported`].
+    pub fn open_default() -> Result<Self> {
+        Self::open_default_with_config(JournalConfig::default())
+    }
+
+    /// Create a live engine from the default system journal roots with a custom configuration.
+    ///
+    /// See [`LiveJournal::open_default`] for platform behavior.
+    pub fn open_default_with_config(config: JournalConfig) -> Result<Self> {
+        core::cfg_select! {
+            target_os = "linux" => {
+                let paths = vec![
+                    PathBuf::from("/run/log/journal"),
+                    PathBuf::from("/var/log/journal"),
+                ];
+                Self::open_dirs_with_config(&paths, config)
+            }
+            _ => {
+                let _ = config;
+                Err(SdJournalError::Unsupported {
+                    reason: "LiveJournal::open_default is only supported on Linux".to_string(),
+                })
+            }
+        }
+    }
+
+    /// Create a live engine from journal files discovered under one root directory.
+    ///
+    /// This is the live-tail counterpart to [`Journal::open_dir`].
+    pub fn open_dir(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_dir_with_config(path, JournalConfig::default())
+    }
+
+    /// Create a live engine from one root directory with a custom configuration.
+    pub fn open_dir_with_config(path: impl AsRef<Path>, config: JournalConfig) -> Result<Self> {
+        let paths = vec![path.as_ref().to_path_buf()];
+        Self::open_dirs_with_config(&paths, config)
+    }
+
+    /// Create a live engine from journal files discovered under multiple root directories.
+    ///
+    /// Unlike [`Journal::open_dirs`], this opens files one at a time during initialization and
+    /// stores only lightweight tail checkpoints afterward. Journal files are opened briefly when
+    /// refreshing topology or reading appended entries.
+    pub fn open_dirs(paths: &[PathBuf]) -> Result<Self> {
+        Self::open_dirs_with_config(paths, JournalConfig::default())
+    }
+
+    /// Create a live engine from multiple root directories with a custom configuration.
+    pub fn open_dirs_with_config(paths: &[PathBuf], config: JournalConfig) -> Result<Self> {
+        validate_live_config(&config)?;
+        let discovery = discover_journal_candidates(paths, &config)?;
+        let tracked = build_tracked_files_from_paths(&discovery.candidates, &config)?;
+
+        let mut out = Self {
+            roots: discovery.roots,
+            config,
+            tracked_files: tracked.files,
+            path_index: tracked.path_index,
+            fallback_dirs: Vec::new(),
+            subscriptions: Vec::new(),
+            last_seen: tracked.last_seen,
+            pending_modified_paths: Vec::new(),
+            pending_topology: None,
+            next_replay_index: 0,
             #[cfg(target_os = "linux")]
             inotify: None,
             #[cfg(target_os = "linux")]
@@ -300,7 +263,7 @@ impl LiveJournal {
 
     /// Register a live-only subscription.
     ///
-    /// The returned subscription only receives entries appended after the current live tail.
+    /// The returned subscription only receives entries after the engine's current tail checkpoint.
     /// It does not scan historical entries. This is the preferred path for normal tailing because
     /// registering the subscription does not rebuild query state.
     pub fn subscribe(&mut self, filter: LiveFilter) -> Result<LiveSubscription> {
@@ -309,55 +272,43 @@ impl LiveJournal {
 
     /// Register a subscription with explicit replay or resume bounds.
     ///
-    /// Any matching backlog covered by `options` is queued to the subscription immediately.
-    /// Future live entries are then dispatched through the shared engine.
+    /// Matching backlog covered by `options` is replayed by subsequent
+    /// [`LiveJournal::poll_once`] or [`LiveJournal::run`] calls before future live entries are
+    /// dispatched to that subscription.
+    /// Replay work is bounded by [`JournalConfig::max_live_batch_entries`] per engine cycle and
+    /// [`JournalConfig::max_live_replay_entries`] per subscription.
     ///
-    /// This may perform a full snapshot refresh to establish the replay boundary. Prefer
+    /// This opens an isolated snapshot to establish the replay boundary. Prefer
     /// [`LiveJournal::subscribe`] when only future entries are needed.
     pub fn subscribe_with_options(
         &mut self,
         options: SubscriptionOptions,
     ) -> Result<LiveSubscription> {
         let compiled = options.filter.compile()?;
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(self.config.live_channel_capacity);
         let alive = Arc::new(AtomicBool::new(true));
         let needs_replay = options.after_cursor.is_some() || options.since_realtime.is_some();
 
-        let snapshot_tail = if needs_replay {
-            let snapshot_tail = self.refresh_snapshot_full()?;
-            self.last_seen = snapshot_tail;
-            snapshot_tail
+        let (start_after, replay) = if needs_replay {
+            let snapshot = self.open_replay_snapshot()?;
+            let start_after = snapshot.last_seen;
+            let replay = ReplayState::new(
+                snapshot,
+                options.after_cursor,
+                options.since_realtime,
+                &self.config,
+            );
+            (start_after, Some(replay))
         } else {
-            self.last_seen
+            (self.last_seen, None)
         };
-
-        if needs_replay {
-            let mut q = self.journal.query();
-            if let Some(since) = options.since_realtime {
-                q.since_realtime(since);
-            }
-            if let Some(cursor) = options.after_cursor {
-                q.after_cursor(cursor);
-            }
-
-            for item in q.iter()? {
-                match item {
-                    Ok(entry) if compiled.matches(&entry) => {
-                        let _ = tx.send(Ok(LiveEntry::new(entry)));
-                    }
-                    Ok(_) => {}
-                    Err(err) => {
-                        warn_live_file_error("skipping live replay entry", &err);
-                    }
-                }
-            }
-        }
 
         self.subscriptions.push(SubscriptionState {
             filter: compiled,
             tx,
-            start_after: snapshot_tail,
+            start_after,
             alive: alive.clone(),
+            replay,
         });
 
         Ok(LiveSubscription { rx, alive })
@@ -377,7 +328,41 @@ impl LiveJournal {
             return Ok(0);
         }
 
+        if let Some(deliveries) = self.dispatch_ready_live_work()?
+            && deliveries != 0
+        {
+            self.remove_closed_subscriptions();
+            return Ok(deliveries);
+        }
+
+        if let Some(deliveries) = self.dispatch_next_replay_batch()? {
+            self.remove_closed_subscriptions();
+            return Ok(deliveries);
+        }
+
         let change = self.wait_for_change();
+        self.dispatch_change(change)
+    }
+
+    fn dispatch_ready_live_work(&mut self) -> Result<Option<usize>> {
+        if self.pending_topology.is_some() {
+            return self.dispatch_pending_topology_batch().map(Some);
+        }
+
+        if !self.pending_modified_paths.is_empty() {
+            let paths = std::mem::take(&mut self.pending_modified_paths);
+            return self.dispatch_modified_paths(&paths).map(Some);
+        }
+
+        let change = self.try_collect_ready_change();
+        if change.is_empty() {
+            return Ok(None);
+        }
+
+        self.dispatch_change(change).map(Some)
+    }
+
+    fn dispatch_change(&mut self, change: WatchChange) -> Result<usize> {
         if change.is_empty() {
             self.remove_closed_subscriptions();
             return Ok(0);
@@ -416,9 +401,27 @@ impl LiveJournal {
         }
     }
 
+    fn try_collect_ready_change(&mut self) -> WatchChange {
+        core::cfg_select! {
+            target_os = "linux" => {
+                if let Some(w) = self.inotify.as_mut() {
+                    w.wait(Duration::ZERO)
+                } else {
+                    self.scan_all_files()
+                }
+            }
+            _ => {
+                self.scan_all_files()
+            }
+        }
+    }
+
     fn poll_all_files_after_sleep(&mut self) -> WatchChange {
         thread::sleep(self.config.poll_interval);
+        self.scan_all_files()
+    }
 
+    fn scan_all_files(&mut self) -> WatchChange {
         let mut topology_changed = false;
         for dir in &self.fallback_dirs {
             match std::fs::metadata(&dir.path).and_then(|meta| meta.modified()) {
@@ -439,7 +442,7 @@ impl LiveJournal {
             match std::fs::metadata(&tracked.path) {
                 Ok(meta) => {
                     let len = meta.len();
-                    let known = tracked.file.live_state().used_size;
+                    let known = tracked.live_state.used_size;
                     if len < known {
                         topology_changed = true;
                         break;
@@ -461,51 +464,183 @@ impl LiveJournal {
         }
     }
 
-    fn refresh_snapshot_full(&mut self) -> Result<Option<SdJournalEntryKey>> {
-        let journal = Journal::open_dirs_with_config(&self.roots, self.config.clone())?;
-        let tracked = build_tracked_files(&journal)?;
-        let snapshot_tail = tracked.last_seen;
-        self.journal = journal_from_tracked(&journal, &tracked.files);
-        self.tracked_files = tracked.files;
-        self.path_index = tracked.path_index;
-        self.refresh_fallback_dirs();
-        self.refresh_watchers();
-        Ok(snapshot_tail)
+    fn open_replay_snapshot(&self) -> Result<JournalSnapshot> {
+        let discovery = discover_journal_candidates(&self.roots, &self.config)?;
+        let snapshot = build_live_snapshot(&discovery.candidates, &self.config)?;
+        Ok(JournalSnapshot {
+            journal: snapshot.journal,
+            last_seen: snapshot.tracked.last_seen,
+        })
     }
 
-    fn refresh_topology_and_dispatch(&mut self) -> Result<usize> {
-        let journal = Journal::open_dirs_with_config(&self.roots, self.config.clone())?;
-        let tracked = build_tracked_files(&journal)?;
-        let journal = journal_from_tracked(&journal, &tracked.files);
+    fn dispatch_next_replay_batch(&mut self) -> Result<Option<usize>> {
+        let Some(idx) = self.next_replay_subscription_index() else {
+            return Ok(None);
+        };
+        self.next_replay_index = idx.saturating_add(1);
 
-        let mut pending = Vec::new();
-        let mut q = journal.query();
-        if let Some(last_seen) = self.last_seen {
-            q.after_cursor(cursor_from_key(last_seen));
+        let Some(replay) = self.subscriptions[idx].replay.as_ref() else {
+            return Ok(None);
+        };
+        if replay.remaining == 0 {
+            return Err(SdJournalError::LimitExceeded {
+                kind: LimitKind::LiveReplayEntries,
+                limit: u64::try_from(self.config.max_live_replay_entries).unwrap_or(u64::MAX),
+            });
         }
-        for item in q.iter()? {
-            match item {
-                Ok(entry) => pending.push(entry),
-                Err(err) => {
-                    warn_live_file_error("skipping live refresh entry", &err);
+
+        let limit = self.config.max_live_batch_entries.min(replay.remaining);
+        let batch = collect_replay_batch(replay, &self.subscriptions[idx].filter, limit)?;
+        let consumed = batch.entries.len();
+        let batch_last_key = batch.last_key;
+        let batch_exhausted = batch.exhausted;
+
+        let mut delivered = 0usize;
+        let mut closed = false;
+        let sub = &mut self.subscriptions[idx];
+        for entry in batch.entries {
+            match send_live_item(
+                &sub.tx,
+                Ok(LiveEntry::new(entry)),
+                self.config.live_queue_full_policy,
+            ) {
+                SendOutcome::Delivered => delivered = delivered.saturating_add(1),
+                SendOutcome::Dropped => {}
+                SendOutcome::Closed => {
+                    closed = true;
+                    break;
                 }
             }
         }
 
-        self.journal = journal;
-        self.tracked_files = tracked.files;
-        self.path_index = tracked.path_index;
+        if closed {
+            self.subscriptions[idx]
+                .alive
+                .store(false, AtomicOrdering::Release);
+            return Ok(Some(delivered));
+        }
+
+        let replay_upper = self.subscriptions[idx]
+            .replay
+            .as_ref()
+            .and_then(|replay| replay.upper_key);
+        let catchup_upper = if batch_exhausted {
+            match (replay_upper, self.last_seen) {
+                (Some(old_upper), Some(live_upper))
+                    if compare_keys(&live_upper, &old_upper) == Ordering::Greater =>
+                {
+                    Some((old_upper, live_upper))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let catchup_journal = if catchup_upper.is_some() {
+            Some(self.open_replay_snapshot()?.journal)
+        } else {
+            None
+        };
+
+        let sub = &mut self.subscriptions[idx];
+        if let Some(replay) = sub.replay.as_mut() {
+            replay.cursor = None;
+            replay.last_key = batch_last_key.or(replay.last_key);
+            replay.remaining = replay.remaining.saturating_sub(consumed);
+        }
+        if batch_exhausted {
+            sub.replay = match (catchup_journal, catchup_upper) {
+                (Some(journal), Some((after_key, upper_key))) => Some(ReplayState::catch_up(
+                    journal,
+                    after_key,
+                    upper_key,
+                    &self.config,
+                )),
+                _ => None,
+            };
+        }
+
+        Ok(Some(delivered))
+    }
+
+    fn next_replay_subscription_index(&self) -> Option<usize> {
+        if self.subscriptions.is_empty() {
+            return None;
+        }
+
+        let start = self.next_replay_index.min(self.subscriptions.len());
+        self.subscriptions[start..]
+            .iter()
+            .position(|sub| sub.replay.is_some())
+            .map(|offset| start + offset)
+            .or_else(|| {
+                self.subscriptions[..start]
+                    .iter()
+                    .position(|sub| sub.replay.is_some())
+            })
+    }
+
+    fn refresh_topology_and_dispatch(&mut self) -> Result<usize> {
+        let previous_last_seen = self.last_seen;
+        let discovery = discover_journal_candidates(&self.roots, &self.config)?;
+        let snapshot = build_live_snapshot(&discovery.candidates, &self.config)?;
+        let last_seen = snapshot.tracked.last_seen;
+        let batch = collect_entries_after_key(
+            &snapshot.journal,
+            previous_last_seen,
+            last_seen,
+            self.config.max_live_batch_entries,
+        )?;
+
+        self.tracked_files = snapshot.tracked.files;
+        self.path_index = snapshot.tracked.path_index;
+        self.advance_last_seen(last_seen);
         self.refresh_fallback_dirs();
         self.refresh_watchers();
+        self.pending_topology = if batch.exhausted {
+            None
+        } else {
+            Some(PendingTopologyCatchup {
+                journal: snapshot.journal,
+                last_key: Some(
+                    batch
+                        .last_key
+                        .expect("non-exhausted topology batch has an entry"),
+                ),
+                upper_key: last_seen,
+            })
+        };
 
-        Ok(self.dispatch_entries(pending, true))
+        Ok(self.dispatch_entries(batch.entries, true))
+    }
+
+    fn dispatch_pending_topology_batch(&mut self) -> Result<usize> {
+        let mut catchup = self
+            .pending_topology
+            .take()
+            .expect("pending topology catch-up state is available");
+        let batch = collect_entries_after_key(
+            &catchup.journal,
+            catchup.last_key,
+            catchup.upper_key,
+            self.config.max_live_batch_entries,
+        )?;
+        if !batch.exhausted {
+            catchup.last_key = Some(
+                batch
+                    .last_key
+                    .expect("non-exhausted topology batch has an entry"),
+            );
+            self.pending_topology = Some(catchup);
+        }
+        Ok(self.dispatch_entries(batch.entries, true))
     }
 
     fn dispatch_modified_paths(&mut self, paths: &[PathBuf]) -> Result<usize> {
         let mut pending = Vec::new();
         let mut active_files = 0usize;
 
-        for path in paths {
+        for (pos, path) in paths.iter().enumerate() {
             let Some(&idx) = self.path_index.get(path) else {
                 if is_candidate_journal_path(path) {
                     return self.refresh_topology_and_dispatch();
@@ -520,14 +655,19 @@ impl LiveJournal {
                 active_files = active_files.saturating_add(1);
             }
             pending.append(&mut entries);
+            if pending.len() >= self.config.max_live_batch_entries {
+                self.pending_modified_paths
+                    .extend_from_slice(&paths[pos + 1..]);
+                break;
+            }
         }
 
         Ok(self.dispatch_entries(pending, active_files <= 1))
     }
 
     fn refresh_tracked_file(&mut self, idx: usize) -> Result<Option<Vec<EntryRef>>> {
-        let old_state = self.tracked_files[idx].file.live_state();
-        let reopened = match self.tracked_files[idx].file.refresh_from_current_handle() {
+        let old_state = self.tracked_files[idx].live_state;
+        let reopened = match JournalFile::open(self.tracked_files[idx].path.clone(), &self.config) {
             Ok(file) => file,
             Err(SdJournalError::Transient { .. }) | Err(SdJournalError::Corrupt { .. }) => {
                 return Ok(None);
@@ -545,23 +685,36 @@ impl LiveJournal {
             return Ok(None);
         }
         if new_state == old_state {
-            tracked.file = reopened;
+            tracked.live_state = new_state;
             return Ok(Some(Vec::new()));
         }
 
-        let offsets = match tracked.tail.drain_new_offsets(&reopened) {
-            Ok(offsets) => offsets,
+        let batch = match tracked
+            .tail
+            .drain_new_offsets(&reopened, self.config.max_live_batch_entries)
+        {
+            Ok(batch) => batch,
             Err(SdJournalError::Transient { .. }) | Err(SdJournalError::Corrupt { .. }) => {
                 return Ok(None);
             }
             Err(e) => return Err(e),
         };
 
-        tracked.file = reopened;
-        let file = tracked.file.clone();
-        let mut entries = Vec::with_capacity(offsets.len());
-        for offset in offsets {
-            entries.push(file.read_entry_ref(offset)?);
+        let mut entries = Vec::with_capacity(batch.offsets.len());
+        for offset in batch.offsets {
+            match reopened.read_entry_ref(offset) {
+                Ok(entry) => entries.push(entry),
+                Err(err) if is_skippable_live_file_error(&err) => {
+                    warn_live_file_error("skipping corrupt live entry", &err);
+                    return Ok(None);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        if batch.exhausted {
+            tracked.live_state = new_state;
+        } else {
+            self.pending_modified_paths.push(tracked.path.clone());
         }
         Ok(Some(entries))
     }
@@ -587,6 +740,10 @@ impl LiveJournal {
             matched.clear();
 
             for (idx, sub) in self.subscriptions.iter_mut().enumerate() {
+                if sub.replay.is_some() {
+                    continue;
+                }
+
                 if let Some(start_after) = sub.start_after {
                     if compare_keys(&key, &start_after) != Ordering::Greater {
                         continue;
@@ -611,15 +768,19 @@ impl LiveJournal {
                             .expect("shared live entry is available")
                             .clone()
                     };
-                    if self.subscriptions[idx].tx.send(Ok(entry)).is_ok() {
-                        deliveries = deliveries.saturating_add(1);
-                    } else {
-                        dead[idx] = true;
+                    match send_live_item(
+                        &self.subscriptions[idx].tx,
+                        Ok(entry),
+                        self.config.live_queue_full_policy,
+                    ) {
+                        SendOutcome::Delivered => deliveries = deliveries.saturating_add(1),
+                        SendOutcome::Dropped => {}
+                        SendOutcome::Closed => dead[idx] = true,
                     }
                 }
             }
 
-            self.last_seen = Some(key);
+            self.advance_last_seen(Some(key));
         }
 
         if dead.iter().any(|dead| *dead) {
@@ -629,6 +790,7 @@ impl LiveJournal {
                 idx = idx.saturating_add(1);
                 keep
             });
+            self.next_replay_index = self.next_replay_index.min(self.subscriptions.len());
         }
 
         deliveries
@@ -637,10 +799,11 @@ impl LiveJournal {
     fn refresh_watchers(&mut self) {
         #[cfg(target_os = "linux")]
         {
-            let watch_paths = collect_watch_paths(&self.roots, &self.journal);
+            let watch_paths = collect_watch_paths(&self.roots, &self.tracked_files);
             if watch_paths != self.watch_paths {
                 self.inotify = InotifyWatcher::new(&watch_paths);
                 self.watch_paths = watch_paths;
+                self.queue_tracked_paths_for_recheck();
                 #[cfg(feature = "tracing")]
                 debug!(
                     inotify = self.inotify.is_some(),
@@ -652,287 +815,36 @@ impl LiveJournal {
     }
 
     fn refresh_fallback_dirs(&mut self) {
-        self.fallback_dirs = collect_fallback_dirs(&self.roots, &self.journal);
+        self.fallback_dirs = collect_fallback_dirs(&self.roots, &self.tracked_files);
+    }
+
+    fn queue_tracked_paths_for_recheck(&mut self) {
+        self.pending_modified_paths.extend(
+            self.tracked_files
+                .iter()
+                .map(|tracked| tracked.path.clone()),
+        );
+        self.pending_modified_paths.sort();
+        self.pending_modified_paths.dedup();
     }
 
     fn remove_closed_subscriptions(&mut self) {
         self.subscriptions
             .retain(|sub| sub.alive.load(AtomicOrdering::Acquire));
-    }
-}
-
-/// In-memory filter builder for live subscriptions.
-///
-/// The filter DSL mirrors the historical query builder, but it only describes live matching
-/// predicates. Time bounds and cursor resumes are configured through [`SubscriptionOptions`].
-///
-/// Direct terms are AND-ed together. Each [`LiveFilter::or_group`] call adds one alternative
-/// branch whose terms are also AND-ed together.
-#[derive(Clone)]
-pub struct LiveFilter {
-    config: JournalConfig,
-    global_terms: Vec<MatchTerm>,
-    or_groups: Vec<Vec<MatchTerm>>,
-    invalid_reason: Option<String>,
-    too_many_terms: bool,
-}
-
-impl LiveFilter {
-    pub(crate) fn new(config: JournalConfig) -> Self {
-        Self {
-            config,
-            global_terms: Vec::new(),
-            or_groups: Vec::new(),
-            invalid_reason: None,
-            too_many_terms: false,
-        }
+        self.next_replay_index = self.next_replay_index.min(self.subscriptions.len());
     }
 
-    /// Match entries whose field equals `value` byte-for-byte.
-    ///
-    /// Multiple terms added directly to a filter are AND-ed together. Validation is deferred until
-    /// the filter is registered with [`LiveJournal::subscribe`] or
-    /// [`LiveJournal::subscribe_with_options`].
-    pub fn match_exact(&mut self, field: &str, value: &[u8]) -> &mut Self {
-        if self.invalid_reason.is_some() {
-            return self;
-        }
-        if let Err(e) = validate_field_name(field, &self.config) {
-            self.invalid_reason = Some(e.to_string());
-            return self;
-        }
-        if self.count_terms() >= self.config.max_query_terms {
-            self.too_many_terms = true;
-            return self;
-        }
-
-        self.global_terms.push(MatchTerm::Exact {
-            field: field.to_string(),
-            value: value.to_vec(),
-        });
-        self
-    }
-
-    /// Match entries that contain `field`, regardless of its value.
-    ///
-    /// Multiple terms added directly to a filter are AND-ed together. Validation is deferred until
-    /// the filter is registered with [`LiveJournal::subscribe`] or
-    /// [`LiveJournal::subscribe_with_options`].
-    pub fn match_present(&mut self, field: &str) -> &mut Self {
-        if self.invalid_reason.is_some() {
-            return self;
-        }
-        if let Err(e) = validate_field_name(field, &self.config) {
-            self.invalid_reason = Some(e.to_string());
-            return self;
-        }
-        if self.count_terms() >= self.config.max_query_terms {
-            self.too_many_terms = true;
-            return self;
-        }
-
-        self.global_terms.push(MatchTerm::Present {
-            field: field.to_string(),
-        });
-        self
-    }
-
-    /// Match entries for a specific systemd unit.
-    ///
-    /// This expands to an OR over `_SYSTEMD_UNIT`, `UNIT`, and `OBJECT_SYSTEMD_UNIT`.
-    pub fn match_unit(&mut self, unit: &str) -> &mut Self {
-        self.match_unit_bytes(unit.as_bytes())
-    }
-
-    /// Same as [`LiveFilter::match_unit`], but accepts raw unit bytes.
-    pub fn match_unit_bytes(&mut self, unit: &[u8]) -> &mut Self {
-        if self.invalid_reason.is_some() {
-            return self;
-        }
-
-        let max_terms = self.config.max_query_terms;
-        let global_len = self.global_terms.len();
-        let new_total_terms = if self.or_groups.is_empty() {
-            global_len.saturating_add(3)
-        } else {
-            let old_group_terms = self.or_groups.iter().map(Vec::len).sum::<usize>();
-            let old_groups = self.or_groups.len();
-            global_len
-                .saturating_add(old_group_terms.saturating_mul(3))
-                .saturating_add(old_groups.saturating_mul(3))
+    fn advance_last_seen(&mut self, key: Option<SdJournalEntryKey>) {
+        let Some(key) = key else {
+            return;
         };
-
-        if new_total_terms > max_terms {
-            self.too_many_terms = true;
-            return self;
+        if self
+            .last_seen
+            .as_ref()
+            .is_none_or(|last| compare_keys(&key, last) == Ordering::Greater)
+        {
+            self.last_seen = Some(key);
         }
-
-        fn unit_term(field: &str, unit: &[u8]) -> MatchTerm {
-            MatchTerm::Exact {
-                field: field.to_string(),
-                value: unit.to_vec(),
-            }
-        }
-
-        let unit_fields = ["_SYSTEMD_UNIT", "UNIT", "OBJECT_SYSTEMD_UNIT"];
-
-        if self.or_groups.is_empty() {
-            self.or_groups = unit_fields
-                .iter()
-                .map(|field| vec![unit_term(field, unit)])
-                .collect();
-            return self;
-        }
-
-        let mut next = Vec::with_capacity(self.or_groups.len().saturating_mul(3));
-        for group in &self.or_groups {
-            for field in unit_fields {
-                let mut branch = group.clone();
-                branch.push(unit_term(field, unit));
-                next.push(branch);
-            }
-        }
-        self.or_groups = next;
-        self
-    }
-
-    /// Add an OR-group to the filter.
-    ///
-    /// Each call creates one OR branch. Terms added inside the closure are AND-ed together within
-    /// that branch. Empty groups are ignored.
-    ///
-    /// ```no_run
-    /// # use sdjournal::Journal;
-    /// # let journal = Journal::open_default()?;
-    /// let mut live = journal.live()?;
-    /// let mut filter = live.filter();
-    /// filter
-    ///     .match_present("MESSAGE")
-    ///     .or_group(|g| {
-    ///         g.match_exact("_SYSTEMD_UNIT", b"sshd.service");
-    ///     })
-    ///     .or_group(|g| {
-    ///         g.match_exact("_SYSTEMD_UNIT", b"systemd.service");
-    ///     });
-    /// let _subscription = live.subscribe(filter)?;
-    /// # Ok::<(), sdjournal::SdJournalError>(())
-    /// ```
-    pub fn or_group<F>(&mut self, f: F) -> &mut Self
-    where
-        F: FnOnce(&mut LiveOrGroupBuilder),
-    {
-        if self.invalid_reason.is_some() {
-            return self;
-        }
-
-        let remaining = self
-            .config
-            .max_query_terms
-            .saturating_sub(self.count_terms());
-        let mut builder = LiveOrGroupBuilder {
-            terms: Vec::new(),
-            config: self.config.clone(),
-            invalid_reason: None,
-            too_many_terms: false,
-            remaining,
-        };
-        f(&mut builder);
-        if let Some(reason) = builder.invalid_reason {
-            self.invalid_reason = Some(reason);
-            return self;
-        }
-        if builder.too_many_terms {
-            self.too_many_terms = true;
-            return self;
-        }
-        if !builder.terms.is_empty() {
-            self.or_groups.push(builder.terms);
-        }
-        self
-    }
-
-    fn compile(&self) -> Result<CompiledFilter> {
-        self.validate()?;
-        Ok(CompiledFilter {
-            branches: build_branches(self),
-        })
-    }
-
-    fn validate(&self) -> Result<()> {
-        if let Some(reason) = &self.invalid_reason {
-            return Err(SdJournalError::InvalidQuery {
-                reason: reason.clone(),
-            });
-        }
-        if self.too_many_terms {
-            return Err(SdJournalError::LimitExceeded {
-                kind: LimitKind::QueryTerms,
-                limit: u64::try_from(self.config.max_query_terms).unwrap_or(u64::MAX),
-            });
-        }
-        Ok(())
-    }
-
-    fn count_terms(&self) -> usize {
-        let mut n = self.global_terms.len();
-        for group in &self.or_groups {
-            n = n.saturating_add(group.len());
-        }
-        n
-    }
-}
-
-/// Builder used inside [`LiveFilter::or_group`].
-///
-/// Multiple terms added to the same builder are AND-ed together.
-pub struct LiveOrGroupBuilder {
-    terms: Vec<MatchTerm>,
-    config: JournalConfig,
-    invalid_reason: Option<String>,
-    too_many_terms: bool,
-    remaining: usize,
-}
-
-impl LiveOrGroupBuilder {
-    /// Add an exact field match to this OR-group.
-    pub fn match_exact(&mut self, field: &str, value: &[u8]) -> &mut Self {
-        if self.invalid_reason.is_some() {
-            return self;
-        }
-        if let Err(e) = validate_field_name(field, &self.config) {
-            self.invalid_reason = Some(e.to_string());
-            return self;
-        }
-        if self.terms.len() >= self.remaining {
-            self.too_many_terms = true;
-            return self;
-        }
-
-        self.terms.push(MatchTerm::Exact {
-            field: field.to_string(),
-            value: value.to_vec(),
-        });
-        self
-    }
-
-    /// Add a field-presence match to this OR-group.
-    pub fn match_present(&mut self, field: &str) -> &mut Self {
-        if self.invalid_reason.is_some() {
-            return self;
-        }
-        if let Err(e) = validate_field_name(field, &self.config) {
-            self.invalid_reason = Some(e.to_string());
-            return self;
-        }
-        if self.terms.len() >= self.remaining {
-            self.too_many_terms = true;
-            return self;
-        }
-
-        self.terms.push(MatchTerm::Present {
-            field: field.to_string(),
-        });
-        self
     }
 }
 
@@ -979,6 +891,7 @@ impl SubscriptionOptions {
 ///
 /// Values are delivered as shared [`LiveEntry`] handles so one decoded entry can be fanned out to
 /// multiple subscribers without duplicating field storage.
+/// Each subscription has a bounded queue controlled by [`JournalConfig::live_channel_capacity`].
 ///
 /// Dropping a subscription unregisters it from the engine. When all subscriptions are dropped,
 /// [`LiveJournal::run`] exits.
@@ -1021,119 +934,57 @@ impl Drop for LiveSubscription {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn collect_watch_paths(roots: &[PathBuf], journal: &Journal) -> Vec<PathBuf> {
-    let mut watch_paths: Vec<PathBuf> = roots.to_vec();
-    for file in &journal.inner.files {
-        watch_paths.push(file.path().to_path_buf());
-        if let Some(parent) = file.path().parent() {
-            watch_paths.push(parent.to_path_buf());
-        }
+fn validate_live_config(config: &JournalConfig) -> Result<()> {
+    if config.max_open_files == 0 {
+        return Err(SdJournalError::InvalidQuery {
+            reason: "max_open_files must be greater than zero".to_string(),
+        });
     }
-    watch_paths.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
-    watch_paths.dedup();
-    watch_paths
-}
-
-fn collect_fallback_dirs(roots: &[PathBuf], journal: &Journal) -> Vec<FallbackDirState> {
-    let mut dirs: Vec<PathBuf> = roots.to_vec();
-    for file in &journal.inner.files {
-        if let Some(parent) = file.path().parent() {
-            dirs.push(parent.to_path_buf());
-        }
+    if config.live_channel_capacity == 0 {
+        return Err(SdJournalError::InvalidQuery {
+            reason: "live_channel_capacity must be greater than zero".to_string(),
+        });
     }
-    dirs.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
-    dirs.dedup();
-    dirs.into_iter()
-        .map(|path| FallbackDirState {
-            modified: std::fs::metadata(&path)
-                .and_then(|meta| meta.modified())
-                .ok(),
-            path,
-        })
-        .collect()
-}
-
-fn journal_from_tracked(journal: &Journal, tracked_files: &[TrackedFile]) -> Journal {
-    Journal {
-        inner: Arc::new(JournalInner {
-            config: journal.inner.config.clone(),
-            roots: journal.inner.roots.clone(),
-            files: tracked_files
-                .iter()
-                .map(|tracked| tracked.file.clone())
-                .collect(),
-        }),
+    if config.max_live_batch_entries == 0 {
+        return Err(SdJournalError::InvalidQuery {
+            reason: "max_live_batch_entries must be greater than zero".to_string(),
+        });
     }
-}
-
-fn build_tracked_files(journal: &Journal) -> Result<TrackedFiles> {
-    let mut tracked_files = Vec::with_capacity(journal.inner.files.len());
-    let mut path_index = HashMap::with_capacity(journal.inner.files.len());
-    let mut last_seen = None;
-    let mut first_skipped_error = None;
-
-    for file in &journal.inner.files {
-        let path = file.path().to_path_buf();
-        let tail = match FileTailCursor::at_end(file) {
-            Ok(tail) => tail,
-            Err(err) if is_skippable_live_file_error(&err) => {
-                warn_skipped_live_file(file.path(), &err);
-                if first_skipped_error.is_none() {
-                    first_skipped_error = Some(err);
-                }
-                continue;
-            }
-            Err(err) => return Err(err),
-        };
-        if let Some(offset) = tail.last_entry_offset {
-            match file.read_entry_meta(offset) {
-                Ok(meta) => {
-                    let key = SdJournalEntryKey {
-                        file_id: meta.file_id,
-                        entry_offset: meta.entry_offset,
-                        seqnum: meta.seqnum,
-                        realtime_usec: meta.realtime_usec,
-                    };
-                    if last_seen
-                        .as_ref()
-                        .is_none_or(|last| compare_keys(&key, last) == Ordering::Greater)
-                    {
-                        last_seen = Some(key);
-                    }
-                }
-                Err(err) if is_skippable_live_file_error(&err) => {
-                    warn_skipped_live_file(file.path(), &err);
-                    if first_skipped_error.is_none() {
-                        first_skipped_error = Some(err);
-                    }
-                    continue;
-                }
-                Err(err) => return Err(err),
-            }
-        }
-
-        let tracked = TrackedFile {
-            path: path.clone(),
-            file_id: file.file_id(),
-            file: file.clone(),
-            tail,
-        };
-        path_index.insert(path, tracked_files.len());
-        tracked_files.push(tracked);
+    if config.max_live_replay_entries == 0 {
+        return Err(SdJournalError::InvalidQuery {
+            reason: "max_live_replay_entries must be greater than zero".to_string(),
+        });
     }
-
-    if tracked_files.is_empty()
-        && let Some(err) = first_skipped_error
+    if config.live_queue_full_policy == LiveQueueFullPolicy::Block
+        && config.max_live_batch_entries > config.live_channel_capacity
     {
-        return Err(err);
+        return Err(SdJournalError::InvalidQuery {
+            reason: "max_live_batch_entries must not exceed live_channel_capacity when live_queue_full_policy is Block".to_string(),
+        });
     }
+    Ok(())
+}
 
-    Ok(TrackedFiles {
-        files: tracked_files,
-        path_index,
-        last_seen,
-    })
+fn send_live_item(
+    tx: &SyncSender<Result<LiveEntry>>,
+    item: Result<LiveEntry>,
+    policy: LiveQueueFullPolicy,
+) -> SendOutcome {
+    match policy {
+        LiveQueueFullPolicy::Block => match tx.send(item) {
+            Ok(()) => SendOutcome::Delivered,
+            Err(_) => SendOutcome::Closed,
+        },
+        LiveQueueFullPolicy::DropNewest => match tx.try_send(item) {
+            Ok(()) => SendOutcome::Delivered,
+            Err(TrySendError::Full(_)) => SendOutcome::Dropped,
+            Err(TrySendError::Disconnected(_)) => SendOutcome::Closed,
+        },
+        LiveQueueFullPolicy::Disconnect => match tx.try_send(item) {
+            Ok(()) => SendOutcome::Delivered,
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => SendOutcome::Closed,
+        },
+    }
 }
 
 fn is_skippable_live_file_error(err: &SdJournalError) -> bool {
@@ -1195,84 +1046,9 @@ fn compare_keys(left: &SdJournalEntryKey, right: &SdJournalEntryKey) -> Ordering
         .then_with(|| left.entry_offset.cmp(&right.entry_offset))
 }
 
-fn validate_field_name(field: &str, config: &JournalConfig) -> Result<()> {
-    if field.len() > config.max_field_name_len {
-        return Err(SdJournalError::InvalidQuery {
-            reason: "field name too long".to_string(),
-        });
-    }
-    if !is_ascii_field_name(field.as_bytes()) {
-        return Err(SdJournalError::InvalidQuery {
-            reason: "field name must be ASCII and must not contain '='".to_string(),
-        });
-    }
-    Ok(())
-}
-
-fn build_branches(filter: &LiveFilter) -> Vec<Vec<MatchTerm>> {
-    if filter.or_groups.is_empty() {
-        return vec![filter.global_terms.clone()];
-    }
-
-    let mut out = Vec::with_capacity(filter.or_groups.len());
-    for group in &filter.or_groups {
-        let mut branch = filter.global_terms.clone();
-        branch.extend_from_slice(group);
-        out.push(branch);
-    }
-    out
-}
-
-fn term_matches<E: MatchableEntry>(entry: &E, term: &MatchTerm) -> bool {
-    match term {
-        MatchTerm::Exact { field, value } => entry.any_field_equals(field, value.as_slice()),
-        MatchTerm::Present { field } => entry.get_field(field).is_some(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn sample_entry() -> EntryOwned {
-        EntryOwned::new(
-            [0x11; 16],
-            7,
-            9,
-            11,
-            13,
-            [0x22; 16],
-            vec![
-                ("MESSAGE".to_string(), b"hello".to_vec()),
-                ("_SYSTEMD_UNIT".to_string(), b"sshd.service".to_vec()),
-                ("UNIT".to_string(), b"sshd.service".to_vec()),
-            ],
-        )
-    }
-
-    #[test]
-    fn live_filter_match_unit_matches_common_unit_fields() {
-        let mut filter = LiveFilter::new(JournalConfig::default());
-        filter.match_unit("sshd.service");
-        let compiled = filter.compile().expect("filter should compile");
-
-        assert!(compiled.matches(&sample_entry()));
-    }
-
-    #[test]
-    fn live_filter_or_group_matches_existing_branch_style() {
-        let mut filter = LiveFilter::new(JournalConfig::default());
-        filter.match_present("MESSAGE");
-        filter.or_group(|group| {
-            group.match_exact("PRIORITY", b"3");
-        });
-        filter.or_group(|group| {
-            group.match_exact("_SYSTEMD_UNIT", b"sshd.service");
-        });
-        let compiled = filter.compile().expect("filter should compile");
-
-        assert!(compiled.matches(&sample_entry()));
-    }
 
     #[test]
     fn compare_keys_matches_historical_query_ordering() {
@@ -1295,28 +1071,46 @@ mod tests {
     }
 
     #[test]
-    fn term_matches_handles_exact_and_present_terms() {
-        let entry = sample_entry();
+    fn validate_live_config_rejects_unbounded_or_blocking_unsafe_values() {
+        let mut cfg = JournalConfig {
+            live_channel_capacity: 0,
+            ..Default::default()
+        };
+        assert!(matches!(
+            validate_live_config(&cfg),
+            Err(SdJournalError::InvalidQuery { .. })
+        ));
 
-        assert!(term_matches(
-            &entry,
-            &MatchTerm::Exact {
-                field: "MESSAGE".to_string(),
-                value: b"hello".to_vec(),
-            }
+        cfg = JournalConfig {
+            max_open_files: 0,
+            ..Default::default()
+        };
+        assert!(matches!(
+            validate_live_config(&cfg),
+            Err(SdJournalError::InvalidQuery { .. })
         ));
-        assert!(term_matches(
-            &entry,
-            &MatchTerm::Present {
-                field: "_SYSTEMD_UNIT".to_string(),
-            }
+
+        cfg = JournalConfig {
+            max_live_batch_entries: 0,
+            ..Default::default()
+        };
+        assert!(matches!(
+            validate_live_config(&cfg),
+            Err(SdJournalError::InvalidQuery { .. })
         ));
-        assert!(!term_matches(
-            &entry,
-            &MatchTerm::Exact {
-                field: "MESSAGE".to_string(),
-                value: b"missing".to_vec(),
-            }
+
+        cfg = JournalConfig {
+            live_channel_capacity: 1,
+            max_live_batch_entries: 2,
+            live_queue_full_policy: LiveQueueFullPolicy::Block,
+            ..Default::default()
+        };
+        assert!(matches!(
+            validate_live_config(&cfg),
+            Err(SdJournalError::InvalidQuery { .. })
         ));
+
+        cfg.live_queue_full_policy = LiveQueueFullPolicy::Disconnect;
+        assert!(validate_live_config(&cfg).is_ok());
     }
 }

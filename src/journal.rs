@@ -24,6 +24,12 @@ pub(crate) struct JournalInner {
     pub(crate) config: JournalConfig,
     pub(crate) roots: Vec<PathBuf>,
     pub(crate) files: Vec<JournalFile>,
+    pub(crate) file_paths: Vec<PathBuf>,
+}
+
+pub(crate) struct JournalDiscovery {
+    pub(crate) roots: Vec<PathBuf>,
+    pub(crate) candidates: Vec<PathBuf>,
 }
 
 impl Journal {
@@ -84,6 +90,10 @@ impl Journal {
     /// Discovery skips symlinks, only keeps files with supported journal extensions, and
     /// deduplicates opened files by journal file ID.
     ///
+    /// When discovery finds more files than [`JournalConfig::max_open_files`], the returned
+    /// [`Journal`] stores file paths and opens files on demand while queries perform a streaming
+    /// merge. Combine this with [`crate::MmapPolicy::Never`] for strict virtual-memory limits.
+    ///
     /// # Errors
     ///
     /// Returns:
@@ -92,77 +102,23 @@ impl Journal {
     /// - [`SdJournalError::LimitExceeded`] when discovery exceeds configured file limits.
     /// - An underlying file or parse error when all candidates fail to open.
     pub fn open_dirs_with_config(paths: &[PathBuf], config: JournalConfig) -> Result<Self> {
-        if paths.is_empty() {
-            return Err(SdJournalError::InvalidQuery {
-                reason: "open_dirs requires at least one path".to_string(),
-            });
-        }
-
-        let mut roots = paths.to_vec();
-        roots.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
-        roots.dedup();
-
-        let mut candidates: Vec<PathBuf> = Vec::new();
-        let mut first_discover_error: Option<SdJournalError> = None;
-        for p in paths {
-            if let Err(e) = discover_journal_paths(p, &config, &mut candidates)
-                && first_discover_error.is_none()
-            {
-                #[cfg(feature = "tracing")]
-                warn!(path = %p.display(), error = %e, "journal discovery failed");
-                first_discover_error = Some(e);
-            }
-        }
-
-        if candidates.is_empty() {
-            return Err(first_discover_error.unwrap_or(SdJournalError::NotFound));
-        }
-
-        candidates.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
-        candidates.dedup();
-
-        if candidates.len() > config.max_journal_files {
-            return Err(SdJournalError::LimitExceeded {
-                kind: LimitKind::JournalFiles,
-                limit: u64::try_from(config.max_journal_files).unwrap_or(u64::MAX),
-            });
-        }
-
-        let mut files = Vec::new();
-        let mut errors = Vec::new();
-        for path in candidates {
-            match JournalFile::open(path, &config) {
-                Ok(f) => {
-                    #[cfg(feature = "tracing")]
-                    debug!(path = %f.path().display(), "opened journal file");
-                    files.push(f)
-                }
-                Err(e) => {
-                    #[cfg(feature = "tracing")]
-                    warn!(error = %e, "failed to open journal file");
-                    errors.push(e)
-                }
-            }
-        }
-
-        if files.is_empty() {
-            return Err(errors
-                .into_iter()
-                .next()
-                .unwrap_or(SdJournalError::NotFound));
-        }
-
-        let mut seen: HashSet<[u8; 16]> = HashSet::new();
-        files.retain(|f| seen.insert(f.file_id()));
+        validate_journal_config(&config)?;
+        let discovery = discover_journal_candidates(paths, &config)?;
+        let file_set = open_journal_file_set(discovery.candidates, &config)?;
 
         #[cfg(feature = "tracing")]
-        debug!(n_files = files.len(), "journal opened");
+        debug!(
+            n_files = file_set.file_paths.len(),
+            lazy = file_set.files.is_empty(),
+            "journal opened"
+        );
 
         Ok(Self {
             inner: Arc::new(JournalInner {
                 config,
-                roots,
-                files,
+                roots: discovery.roots,
+                files: file_set.files,
+                file_paths: file_set.file_paths,
             }),
         })
     }
@@ -200,11 +156,185 @@ impl Journal {
         let key = crate::seal::parse_verification_key(verification_key)?;
         let params = crate::seal::FsprgParams::new(key.seed())?;
 
-        for f in &self.inner.files {
-            crate::seal::verify_file_seal(f, &params)?;
+        for idx in 0..self.inner.file_paths.len() {
+            let f = self.inner.open_file_by_index(idx)?;
+            crate::seal::verify_file_seal(&f, &params)?;
         }
         Ok(())
     }
+}
+
+pub(crate) struct JournalFileSet {
+    pub(crate) files: Vec<JournalFile>,
+    pub(crate) file_paths: Vec<PathBuf>,
+}
+
+impl JournalInner {
+    pub(crate) fn is_lazy(&self) -> bool {
+        self.files.is_empty() && !self.file_paths.is_empty()
+    }
+
+    pub(crate) fn open_file_by_index(&self, idx: usize) -> Result<JournalFile> {
+        if let Some(file) = self.files.get(idx) {
+            return Ok(file.clone());
+        }
+        let path = self.file_paths.get(idx).ok_or(SdJournalError::NotFound)?;
+        JournalFile::open(path.clone(), &self.config)
+    }
+}
+
+pub(crate) fn journal_from_file_paths(
+    roots: Vec<PathBuf>,
+    file_paths: Vec<PathBuf>,
+    config: JournalConfig,
+) -> Result<Journal> {
+    validate_journal_config(&config)?;
+    let file_set = open_journal_file_set(file_paths, &config)?;
+    Ok(Journal {
+        inner: Arc::new(JournalInner {
+            config,
+            roots,
+            files: file_set.files,
+            file_paths: file_set.file_paths,
+        }),
+    })
+}
+
+pub(crate) fn journal_from_open_files(config: JournalConfig, files: Vec<JournalFile>) -> Journal {
+    let file_paths = files.iter().map(|file| file.path().to_path_buf()).collect();
+    Journal {
+        inner: Arc::new(JournalInner {
+            config,
+            roots: Vec::new(),
+            files,
+            file_paths,
+        }),
+    }
+}
+
+fn validate_journal_config(config: &JournalConfig) -> Result<()> {
+    if config.max_open_files == 0 {
+        return Err(SdJournalError::InvalidQuery {
+            reason: "max_open_files must be greater than zero".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn open_journal_file_set(paths: Vec<PathBuf>, config: &JournalConfig) -> Result<JournalFileSet> {
+    if paths.len() <= config.max_open_files {
+        open_eager_file_set(paths, config)
+    } else {
+        open_lazy_file_set(paths, config)
+    }
+}
+
+fn open_eager_file_set(paths: Vec<PathBuf>, config: &JournalConfig) -> Result<JournalFileSet> {
+    let mut files = Vec::new();
+    let mut errors = Vec::new();
+    for path in paths {
+        match JournalFile::open(path, config) {
+            Ok(f) => {
+                #[cfg(feature = "tracing")]
+                debug!(path = %f.path().display(), "opened journal file");
+                files.push(f)
+            }
+            Err(e) => {
+                #[cfg(feature = "tracing")]
+                warn!(error = %e, "failed to open journal file");
+                errors.push(e)
+            }
+        }
+    }
+
+    if files.is_empty() {
+        return Err(errors
+            .into_iter()
+            .next()
+            .unwrap_or(SdJournalError::NotFound));
+    }
+
+    let mut seen: HashSet<[u8; 16]> = HashSet::new();
+    files.retain(|f| seen.insert(f.file_id()));
+    let file_paths = files.iter().map(|file| file.path().to_path_buf()).collect();
+
+    Ok(JournalFileSet { files, file_paths })
+}
+
+fn open_lazy_file_set(paths: Vec<PathBuf>, config: &JournalConfig) -> Result<JournalFileSet> {
+    let mut file_paths = Vec::new();
+    let mut errors = Vec::new();
+    let mut seen: HashSet<[u8; 16]> = HashSet::new();
+
+    for path in paths {
+        match JournalFile::open(path.clone(), config) {
+            Ok(file) => {
+                if seen.insert(file.file_id()) {
+                    file_paths.push(path);
+                }
+            }
+            Err(e) => {
+                #[cfg(feature = "tracing")]
+                warn!(error = %e, "failed to validate journal file for lazy open");
+                errors.push(e);
+            }
+        }
+    }
+
+    if file_paths.is_empty() {
+        return Err(errors
+            .into_iter()
+            .next()
+            .unwrap_or(SdJournalError::NotFound));
+    }
+
+    Ok(JournalFileSet {
+        files: Vec::new(),
+        file_paths,
+    })
+}
+
+pub(crate) fn discover_journal_candidates(
+    paths: &[PathBuf],
+    config: &JournalConfig,
+) -> Result<JournalDiscovery> {
+    if paths.is_empty() {
+        return Err(SdJournalError::InvalidQuery {
+            reason: "open_dirs requires at least one path".to_string(),
+        });
+    }
+
+    let mut roots = paths.to_vec();
+    roots.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+    roots.dedup();
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    let mut first_discover_error: Option<SdJournalError> = None;
+    for p in paths {
+        if let Err(e) = discover_journal_paths(p, config, &mut candidates)
+            && first_discover_error.is_none()
+        {
+            #[cfg(feature = "tracing")]
+            warn!(path = %p.display(), error = %e, "journal discovery failed");
+            first_discover_error = Some(e);
+        }
+    }
+
+    if candidates.is_empty() {
+        return Err(first_discover_error.unwrap_or(SdJournalError::NotFound));
+    }
+
+    candidates.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+    candidates.dedup();
+
+    if candidates.len() > config.max_journal_files {
+        return Err(SdJournalError::LimitExceeded {
+            kind: LimitKind::JournalFiles,
+            limit: u64::try_from(config.max_journal_files).unwrap_or(u64::MAX),
+        });
+    }
+
+    Ok(JournalDiscovery { roots, candidates })
 }
 
 fn discover_journal_paths(

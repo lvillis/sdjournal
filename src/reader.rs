@@ -71,10 +71,6 @@ impl FileAccess {
         Self { path, file }
     }
 
-    pub(crate) fn file(&self) -> Arc<File> {
-        self.file.clone()
-    }
-
     pub(crate) fn read_known_valid(&self, offset: u64, len: usize) -> Result<ByteBuf> {
         let mut buf = vec![0u8; len];
         read_exact_at(self.file.as_ref(), offset, &mut buf)
@@ -109,6 +105,7 @@ impl FileAccess {
 #[derive(Clone)]
 pub(crate) struct MmapAccess {
     path: PathBuf,
+    #[cfg(test)]
     file: Arc<File>,
     map: Arc<Mmap>,
 }
@@ -116,11 +113,14 @@ pub(crate) struct MmapAccess {
 #[cfg(feature = "mmap")]
 impl MmapAccess {
     pub(crate) fn new(path: PathBuf, file: Arc<File>, map: Arc<Mmap>) -> Self {
-        Self { path, file, map }
-    }
-
-    pub(crate) fn file(&self) -> Arc<File> {
-        self.file.clone()
+        #[cfg(not(test))]
+        let _ = file;
+        Self {
+            path,
+            #[cfg(test)]
+            file,
+            map,
+        }
     }
 
     pub(crate) fn read_known_valid(&self, offset: u64, len: usize) -> Result<ByteBuf> {

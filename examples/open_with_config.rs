@@ -1,6 +1,6 @@
 //! Open journals with a custom `JournalConfig`.
 
-use sdjournal::{EntryRef, Journal, JournalConfig};
+use sdjournal::{EntryRef, Journal, JournalConfig, MmapPolicy};
 use std::error::Error;
 use std::time::Duration;
 
@@ -10,7 +10,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let config = JournalConfig {
         include_journal_tilde: true,
         allow_mmap_online: false,
+        mmap_policy: MmapPolicy::Never,
         max_journal_files: 256,
+        max_open_files: 16,
         max_query_terms: 32,
         max_decompressed_bytes: 2 * 1024 * 1024,
         poll_interval: Duration::from_millis(500),

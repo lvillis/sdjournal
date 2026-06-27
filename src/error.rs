@@ -44,6 +44,8 @@ pub enum LimitKind {
     JournalFiles,
     /// Maximum number of query terms accepted in a single query.
     QueryTerms,
+    /// Maximum number of historical entries scanned by one live replay subscription.
+    LiveReplayEntries,
 }
 
 impl fmt::Display for LimitKind {
@@ -56,6 +58,7 @@ impl fmt::Display for LimitKind {
             LimitKind::ObjectChainSteps => write!(f, "object_chain_steps"),
             LimitKind::JournalFiles => write!(f, "journal_files"),
             LimitKind::QueryTerms => write!(f, "query_terms"),
+            LimitKind::LiveReplayEntries => write!(f, "live_replay_entries"),
         }
     }
 }
@@ -212,6 +215,10 @@ mod tests {
         );
         assert_eq!(LimitKind::JournalFiles.to_string(), "journal_files");
         assert_eq!(LimitKind::QueryTerms.to_string(), "query_terms");
+        assert_eq!(
+            LimitKind::LiveReplayEntries.to_string(),
+            "live_replay_entries"
+        );
     }
 
     #[test]

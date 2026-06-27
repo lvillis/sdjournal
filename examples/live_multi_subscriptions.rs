@@ -3,7 +3,7 @@
 //! This is the recommended pattern when you need to tail several units at once. Build one
 //! `LiveJournal`, register multiple subscriptions, then drive the engine once in the background.
 
-use sdjournal::Journal;
+use sdjournal::LiveJournal;
 use std::error::Error;
 use std::io::{Error as IoError, ErrorKind};
 use std::sync::mpsc::RecvTimeoutError;
@@ -18,8 +18,7 @@ struct Args {
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let args = parse_args()?;
-    let journal = Journal::open_default()?;
-    let mut live = journal.live()?;
+    let mut live = LiveJournal::open_default()?;
 
     let mut subscriptions = Vec::new();
     for unit in &args.units {

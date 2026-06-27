@@ -231,13 +231,15 @@ struct SharedLiveSetup {
     subscriptions: Vec<LiveSubscription>,
 }
 
-fn build_independent_live_setup(journal: &Journal, units: &[&str]) -> IndependentLiveSetup {
+fn build_independent_live_setup(
+    layout: &SyntheticJournalLayout,
+    units: &[&str],
+) -> IndependentLiveSetup {
     let mut engines = Vec::with_capacity(units.len());
     let mut subscriptions = Vec::with_capacity(units.len());
 
     for unit in units {
-        let mut live = journal
-            .live()
+        let mut live = LiveJournal::open_dir_with_config(layout.root(), benchmark_config())
             .expect("independent live engine should succeed");
         let mut filter = live.filter();
         filter.match_unit(unit);
@@ -254,8 +256,9 @@ fn build_independent_live_setup(journal: &Journal, units: &[&str]) -> Independen
     }
 }
 
-fn build_shared_live_setup(journal: &Journal, units: &[&str]) -> SharedLiveSetup {
-    let mut engine = journal.live().expect("shared live engine should succeed");
+fn build_shared_live_setup(layout: &SyntheticJournalLayout, units: &[&str]) -> SharedLiveSetup {
+    let mut engine = LiveJournal::open_dir_with_config(layout.root(), benchmark_config())
+        .expect("shared live engine should succeed");
     let mut subscriptions = Vec::with_capacity(units.len());
 
     for unit in units {
@@ -290,64 +293,60 @@ fn benchmark_follow_perf(c: &mut Criterion) {
     let mut group = c.benchmark_group("follow_perf");
     group.sample_size(20);
 
-    group.bench_function("multi_unit_independent_live_engines_x4_setup", |b| {
-        b.iter_batched(
-            || open_layout(&layout),
-            |journal| black_box(build_independent_live_setup(&journal, &BENCH_UNITS[..4])),
-            BatchSize::SmallInput,
-        );
+    group.bench_function("direct_multi_unit_independent_live_engines_x4_setup", |b| {
+        b.iter(|| black_box(build_independent_live_setup(&layout, &BENCH_UNITS[..4])));
     });
 
-    group.bench_function("shared_engine_multi_subscriptions_x4_setup", |b| {
-        b.iter_batched(
-            || open_layout(&layout),
-            |journal| black_box(build_shared_live_setup(&journal, &BENCH_UNITS[..4])),
-            BatchSize::SmallInput,
-        );
+    group.bench_function("direct_shared_engine_multi_subscriptions_x4_setup", |b| {
+        b.iter(|| black_box(build_shared_live_setup(&layout, &BENCH_UNITS[..4])));
     });
 
-    group.bench_function("multi_unit_independent_live_engines_x4_idle_poll", |b| {
-        b.iter_batched(
-            || build_independent_live_setup(&open_layout(&layout), &BENCH_UNITS[..4]),
-            |mut setup| {
-                let mut ready = 0usize;
-                for engine in &mut setup.engines {
-                    engine.poll_once().expect("idle live poll should succeed");
-                }
-                for subscription in &setup.subscriptions {
-                    ready = ready.saturating_add(drain_ready(subscription));
-                }
-                black_box(ready)
-            },
-            BatchSize::SmallInput,
-        );
-    });
+    group.bench_function(
+        "direct_multi_unit_independent_live_engines_x4_idle_poll",
+        |b| {
+            b.iter_batched(
+                || build_independent_live_setup(&layout, &BENCH_UNITS[..4]),
+                |mut setup| {
+                    let mut ready = 0usize;
+                    for engine in &mut setup.engines {
+                        engine.poll_once().expect("idle live poll should succeed");
+                    }
+                    for subscription in &setup.subscriptions {
+                        ready = ready.saturating_add(drain_ready(subscription));
+                    }
+                    black_box(ready)
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
 
-    group.bench_function("shared_engine_multi_subscriptions_x4_idle_poll", |b| {
-        b.iter_batched(
-            || build_shared_live_setup(&open_layout(&layout), &BENCH_UNITS[..4]),
-            |mut setup| {
-                setup
-                    .engine
-                    .poll_once()
-                    .expect("shared idle live poll should succeed");
-                let mut ready = 0usize;
-                for subscription in &setup.subscriptions {
-                    ready = ready.saturating_add(drain_ready(subscription));
-                }
-                black_box(ready)
-            },
-            BatchSize::SmallInput,
-        );
-    });
+    group.bench_function(
+        "direct_shared_engine_multi_subscriptions_x4_idle_poll",
+        |b| {
+            b.iter_batched(
+                || build_shared_live_setup(&layout, &BENCH_UNITS[..4]),
+                |mut setup| {
+                    setup
+                        .engine
+                        .poll_once()
+                        .expect("shared idle live poll should succeed");
+                    let mut ready = 0usize;
+                    for subscription in &setup.subscriptions {
+                        ready = ready.saturating_add(drain_ready(subscription));
+                    }
+                    black_box(ready)
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
 
-    group.bench_function("single_unit_live_engine_append_and_deliver", |b| {
+    group.bench_function("direct_single_unit_live_engine_append_and_deliver", |b| {
         b.iter_batched(
             || {
                 let layout = SyntheticJournalLayout::new();
-                let journal = open_layout(&layout);
-                let mut live = journal
-                    .live()
+                let mut live = LiveJournal::open_dir_with_config(layout.root(), benchmark_config())
                     .expect("single-unit live engine should succeed");
                 let mut filter = live.filter();
                 filter.match_unit(BENCH_UNITS[0]);
@@ -366,13 +365,12 @@ fn benchmark_follow_perf(c: &mut Criterion) {
     });
 
     group.bench_function(
-        "multi_unit_independent_live_engines_x4_append_and_deliver",
+        "direct_multi_unit_independent_live_engines_x4_append_and_deliver",
         |b| {
             b.iter_batched(
                 || {
                     let layout = SyntheticJournalLayout::new();
-                    let journal = open_layout(&layout);
-                    let setup = build_independent_live_setup(&journal, &BENCH_UNITS[..4]);
+                    let setup = build_independent_live_setup(&layout, &BENCH_UNITS[..4]);
                     (layout, setup)
                 },
                 |(layout, mut setup)| {
@@ -391,13 +389,12 @@ fn benchmark_follow_perf(c: &mut Criterion) {
     );
 
     group.bench_function(
-        "shared_engine_multi_subscriptions_x4_append_and_deliver",
+        "direct_shared_engine_multi_subscriptions_x4_append_and_deliver",
         |b| {
             b.iter_batched(
                 || {
                     let layout = SyntheticJournalLayout::new();
-                    let journal = open_layout(&layout);
-                    let setup = build_shared_live_setup(&journal, &BENCH_UNITS[..4]);
+                    let setup = build_shared_live_setup(&layout, &BENCH_UNITS[..4]);
                     (layout, setup)
                 },
                 |(layout, mut setup)| {

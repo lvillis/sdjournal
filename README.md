@@ -9,7 +9,8 @@
 
 - Pure Rust, with no `libsystemd` dependency
 - Bounded, corruption-resistant parsing for production use
-- Stable merge ordering, cursor checkpoints, and shared live subscriptions
+- Stable merge ordering, cursor checkpoints, and bounded shared live subscriptions
+- Low-memory mode with bounded open files and optional mmap disablement
 - Optional mmap, compression backends, tracing, Tokio integration, and FSS verification
 
 ## Compatibility
@@ -32,6 +33,9 @@ cargo add sdjournal
   - `tracing`: emit diagnostics via `tracing` (caller installs a subscriber)
   - `tokio`: provides an async live-subscription adapter
   - `verify-seal`: verify Forward Secure Sealing (TAG/FSS) with a systemd verification key
+
+For constrained processes, set `JournalConfig::max_open_files` to a small value and
+`JournalConfig::mmap_policy` to `MmapPolicy::Never`.
 
 ## Quickstart
 

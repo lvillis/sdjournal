@@ -505,6 +505,7 @@ mod tests {
                 config,
                 roots: Vec::new(),
                 files: Vec::new(),
+                file_paths: Vec::new(),
             }),
         }
     }

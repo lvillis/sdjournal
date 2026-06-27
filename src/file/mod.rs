@@ -4,6 +4,8 @@ mod index;
 mod iter;
 
 use crate::config::JournalConfig;
+#[cfg(feature = "mmap")]
+use crate::config::MmapPolicy;
 use crate::error::{LimitKind, Result, SdJournalError};
 use crate::format::{Header, STATE_ARCHIVED};
 #[cfg(feature = "mmap")]
@@ -19,7 +21,6 @@ use std::sync::{Arc, Mutex};
 #[cfg(feature = "tracing")]
 use tracing::debug;
 
-pub(crate) use self::index::DataObjectRef;
 pub(crate) use self::iter::{DataEntryOffsetIter, EntryCursorFields, EntryMeta, FileEntryIter};
 
 #[derive(Clone)]
@@ -61,14 +62,6 @@ impl JournalFile {
         })?);
 
         Self::open_from_file(path, file, config)
-    }
-
-    pub(crate) fn refresh_from_current_handle(&self) -> Result<Self> {
-        Self::open_from_file(
-            self.inner.path.clone(),
-            self.current_file()?,
-            &self.inner.config,
-        )
     }
 
     fn open_from_file(path: PathBuf, file: Arc<File>, config: &JournalConfig) -> Result<Self> {
@@ -120,10 +113,13 @@ impl JournalFile {
 
         #[cfg(feature = "mmap")]
         let access: Access = {
-            let use_mmap = match header.state {
-                STATE_ONLINE => config.allow_mmap_online,
-                STATE_OFFLINE | STATE_ARCHIVED => true,
-                _ => false,
+            let use_mmap = match config.mmap_policy {
+                MmapPolicy::Never => false,
+                MmapPolicy::Auto => match header.state {
+                    STATE_ONLINE => config.allow_mmap_online,
+                    STATE_OFFLINE | STATE_ARCHIVED => true,
+                    _ => false,
+                },
             };
 
             if use_mmap {
@@ -239,24 +235,5 @@ impl JournalFile {
         })?;
         crate::util::ensure_limit_usize(LimitKind::ObjectSizeBytes, max, size_usize)?;
         self.read_bytes(offset, size_usize)
-    }
-
-    fn current_file(&self) -> Result<Arc<File>> {
-        let access = self
-            .inner
-            .access
-            .lock()
-            .map_err(|_| SdJournalError::Io {
-                op: "lock",
-                path: Some(self.inner.path.clone()),
-                source: std::io::Error::other("poisoned lock"),
-            })?
-            .clone();
-
-        Ok(match access {
-            Access::File(access) => access.file(),
-            #[cfg(feature = "mmap")]
-            Access::Mmap(access) => access.file(),
-        })
     }
 }

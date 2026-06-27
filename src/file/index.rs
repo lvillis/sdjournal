@@ -45,11 +45,11 @@ impl JournalFile {
         self.read_data_payload_bytes(data_offset, &meta)
     }
 
-    pub(crate) fn find_data_object(&self, payload: &[u8]) -> Result<Option<DataObjectRef>> {
+    pub(crate) fn find_data_objects(&self, payload: &[u8]) -> Result<Vec<DataObjectRef>> {
         let table_offset = self.inner.header.data_hash_table_offset;
         let table_size = self.inner.header.data_hash_table_size;
         if table_offset == 0 || table_size == 0 {
-            return Ok(None);
+            return Ok(Vec::new());
         }
         if !table_size.is_multiple_of(16) {
             return Err(SdJournalError::Corrupt {
@@ -61,7 +61,7 @@ impl JournalFile {
 
         let buckets = table_size / 16;
         if buckets == 0 {
-            return Ok(None);
+            return Ok(Vec::new());
         }
 
         let want_hash = self.payload_hash(payload);
@@ -73,6 +73,7 @@ impl JournalFile {
         )?;
         let item = self.read_hash_item(item_offset)?;
 
+        let mut out = Vec::new();
         let mut current = item.head_hash_offset;
         let mut steps = 0usize;
         while current != 0 {
@@ -89,18 +90,18 @@ impl JournalFile {
             if meta.hash == want_hash {
                 let have_payload = self.read_data_payload_bytes(current, &meta)?;
                 if have_payload.as_slice() == payload {
-                    return Ok(Some(DataObjectRef {
+                    out.push(DataObjectRef {
                         entry_offset: meta.entry_offset,
                         entry_array_offset: meta.entry_array_offset,
                         n_entries: meta.n_entries,
-                    }));
+                    });
                 }
             }
 
             current = meta.next_hash_offset;
         }
 
-        Ok(None)
+        Ok(out)
     }
 
     pub(crate) fn data_entry_offsets(

@@ -70,6 +70,12 @@ pub fn synthetic_message(seed: u8, entry_idx: usize, unit: &str) -> String {
     format!("synthetic-message-{seed}-{entry_idx}-{unit}")
 }
 
+#[allow(dead_code)]
+pub fn write_synthetic_journal_file<S: AsRef<str>>(path: &Path, units: &[S], seed: u8) {
+    let entry_array_capacity = DEFAULT_ENTRY_ARRAY_CAPACITY.max(units.len());
+    write_synthetic_journal(path, units, seed, entry_array_capacity);
+}
+
 fn write_synthetic_journal<S: AsRef<str>>(
     path: &Path,
     units: &[S],

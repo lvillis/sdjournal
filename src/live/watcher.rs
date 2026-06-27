@@ -68,12 +68,11 @@ impl InotifyWatcher {
             return None;
         }
 
-        let mut watcher = Self {
+        let watcher = Self {
             inotify,
             buffer: vec![MaybeUninit::uninit(); 4096],
             targets,
         };
-        watcher.clear_pending_events();
         Some(watcher)
     }
 
@@ -125,15 +124,6 @@ impl InotifyWatcher {
                     return change;
                 }
             }
-        }
-    }
-
-    fn clear_pending_events(&mut self) {
-        let timeout = Timespec::try_from(Duration::ZERO).ok();
-        let mut pfd = [PollFd::new(&self.inotify, PollFlags::IN)];
-        pfd[0].clear_revents();
-        if matches!(poll(&mut pfd, timeout.as_ref()), Ok(ready) if ready > 0) {
-            let _ = self.drain_ready_events();
         }
     }
 }

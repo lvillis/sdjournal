@@ -2,7 +2,7 @@
 
 #[cfg(feature = "tokio")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use sdjournal::Journal;
+    use sdjournal::LiveJournal;
     use std::thread;
 
     let unit = std::env::args()
@@ -14,8 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .transpose()?
         .unwrap_or(5usize);
 
-    let journal = Journal::open_default()?;
-    let mut live = journal.live()?;
+    let mut live = LiveJournal::open_default()?;
     let mut filter = live.filter();
     filter.match_unit(&unit);
 

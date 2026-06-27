@@ -5,7 +5,7 @@
 
 #[cfg(target_os = "linux")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use sdjournal::{Cursor, Journal, SubscriptionOptions};
+    use sdjournal::{Cursor, LiveJournal, SubscriptionOptions};
     use std::path::PathBuf;
     use std::thread;
 
@@ -28,8 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => return Err(e.into()),
     }
 
-    let journal = Journal::open_default()?;
-    let mut live = journal.live()?;
+    let mut live = LiveJournal::open_default()?;
     let mut filter = live.filter();
     filter.match_exact("_SYSTEMD_UNIT", unit.as_bytes());
     let mut options = SubscriptionOptions::new(filter);

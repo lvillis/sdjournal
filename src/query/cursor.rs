@@ -21,18 +21,17 @@ pub(super) fn build_cursor_key(query: &JournalQuery) -> Result<Option<(EntryMeta
     }
 
     if let Some((file_id, entry_offset)) = cursor.file_offset() {
-        let file = query
-            .journal
-            .inner
-            .files
-            .iter()
-            .find(|f| f.file_id() == file_id)
-            .ok_or(SdJournalError::NotFound)?;
-
-        let meta = file
-            .read_entry_meta(entry_offset)
-            .map_err(|_| SdJournalError::NotFound)?;
-        return Ok(Some((meta, *inclusive)));
+        for idx in 0..query.journal.inner.file_paths.len() {
+            let file = query.journal.inner.open_file_by_index(idx)?;
+            if file.file_id() != file_id {
+                continue;
+            }
+            let meta = file
+                .read_entry_meta(entry_offset)
+                .map_err(|_| SdJournalError::NotFound)?;
+            return Ok(Some((meta, *inclusive)));
+        }
+        return Err(SdJournalError::NotFound);
     }
 
     if let Some(sys) = cursor.systemd() {
@@ -73,6 +72,10 @@ fn find_exact_systemd_cursor(
     sys: &crate::cursor::SystemdCursor,
 ) -> Result<Option<EntryMeta>> {
     let mut candidates: Vec<&crate::file::JournalFile> = Vec::new();
+    if query.journal.inner.is_lazy() {
+        return find_exact_systemd_cursor_lazy(query, sys);
+    }
+
     if let Some(seqnum_id) = sys.seqnum_id {
         for f in &query.journal.inner.files {
             if f.seqnum_id() == seqnum_id {
@@ -95,6 +98,71 @@ fn find_exact_systemd_cursor(
             Err(e) => {
                 if first_error.is_none() {
                     first_error = Some(e);
+                }
+            }
+        }
+    }
+
+    match first_error {
+        Some(e) => Err(e),
+        None => Ok(None),
+    }
+}
+
+fn find_exact_systemd_cursor_lazy(
+    query: &JournalQuery,
+    sys: &crate::cursor::SystemdCursor,
+) -> Result<Option<EntryMeta>> {
+    let mut first_error: Option<SdJournalError> = None;
+    let mut fallback_to_all = sys.seqnum_id.is_none();
+
+    if let Some(seqnum_id) = sys.seqnum_id {
+        let mut matched_seqnum_id = false;
+        for idx in 0..query.journal.inner.file_paths.len() {
+            let file = match query.journal.inner.open_file_by_index(idx) {
+                Ok(file) => file,
+                Err(err) => {
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                    continue;
+                }
+            };
+            if file.seqnum_id() != seqnum_id {
+                continue;
+            }
+            matched_seqnum_id = true;
+            match find_exact_systemd_cursor_in_file(&file, sys) {
+                Ok(Some(meta)) => return Ok(Some(meta)),
+                Ok(None) => {}
+                Err(e) => {
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    }
+                }
+            }
+        }
+        fallback_to_all = !matched_seqnum_id;
+    }
+
+    if fallback_to_all {
+        for idx in 0..query.journal.inner.file_paths.len() {
+            let file = match query.journal.inner.open_file_by_index(idx) {
+                Ok(file) => file,
+                Err(err) => {
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                    continue;
+                }
+            };
+            match find_exact_systemd_cursor_in_file(&file, sys) {
+                Ok(Some(meta)) => return Ok(Some(meta)),
+                Ok(None) => {}
+                Err(e) => {
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    }
                 }
             }
         }

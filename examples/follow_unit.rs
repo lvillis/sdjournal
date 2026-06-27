@@ -1,6 +1,6 @@
 //! Subscribe to one unit's live stream and print a bounded number of new entries.
 
-use sdjournal::Journal;
+use sdjournal::LiveJournal;
 use std::error::Error;
 use std::thread;
 
@@ -14,8 +14,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .transpose()?
         .unwrap_or(5usize);
 
-    let journal = Journal::open_default()?;
-    let mut live = journal.live()?;
+    let mut live = LiveJournal::open_default()?;
     let mut filter = live.filter();
     filter.match_unit(&unit);
 

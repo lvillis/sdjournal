@@ -15,7 +15,8 @@
 //!
 //! # Feature Flags
 //!
-//! - `mmap` (default): use memory mapping when safe to do so for journal file reads.
+//! - `mmap` (default): allow memory mapping for journal file reads. Runtime use is controlled by
+//!   [`JournalConfig::mmap_policy`].
 //! - `lz4` (default): enable LZ4-compressed DATA payload decoding.
 //! - `zstd` (default): enable Zstandard-compressed DATA payload decoding.
 //! - `xz`: enable XZ-compressed DATA payload decoding.
@@ -42,7 +43,13 @@
 //! Use [`LiveJournal`] for tailing. A live engine keeps per-file tail state, watches for appended
 //! data, and can fan out each new entry to multiple [`LiveSubscription`]s. Prefer one
 //! [`LiveJournal`] with multiple subscriptions over multiple independent live engines when tailing
-//! several units or filters.
+//! several units or filters. Use [`LiveJournal::open_default`] or [`LiveJournal::open_dirs`] when
+//! only live tailing is needed; this avoids keeping a historical [`Journal`] open. Live delivery
+//! uses bounded queues and batch sizes configured through [`JournalConfig`].
+//!
+//! For constrained processes, set [`JournalConfig::max_open_files`] to a small value and
+//! [`JournalConfig::mmap_policy`] to [`MmapPolicy::Never`]. Historical queries then use a streaming
+//! merge that avoids keeping every discovered journal file mapped or open.
 //!
 //! # Entry Ownership
 //!
@@ -87,7 +94,7 @@ mod reader;
 mod seal;
 mod util;
 
-pub use crate::config::JournalConfig;
+pub use crate::config::{JournalConfig, LiveQueueFullPolicy, MmapPolicy};
 pub use crate::cursor::Cursor;
 pub use crate::entry::{EntryOwned, EntryRef, LiveEntry};
 pub use crate::error::{Result, SdJournalError};
