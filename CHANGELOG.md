@@ -1,8 +1,17 @@
+## [0.1.21] - 2026-06-28
+
+### 🐛 Bug Fixes
+
+- *(live)* [**breaking**] Make replay entry cap optional
 ## [0.1.20] - 2026-06-27
 
 ### ⚡ Performance
 
 - *(query)* Prune journal files by entry range
+
+### ⚙️ Miscellaneous Tasks
+
+- *(release)* 0.1.20
 ## [0.1.19] - 2026-06-27
 
 ### 🐛 Bug Fixes
