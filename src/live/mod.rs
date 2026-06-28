@@ -77,8 +77,9 @@ enum SendOutcome {
 /// dispatch each entry once to all matching subscriptions. Full directory rescans are reserved for
 /// topology changes such as file creation, removal, or rotation.
 ///
-/// Live delivery is bounded by [`JournalConfig::live_channel_capacity`],
-/// [`JournalConfig::max_live_batch_entries`], and [`JournalConfig::max_live_replay_entries`].
+/// Live delivery is bounded per cycle by [`JournalConfig::live_channel_capacity`] and
+/// [`JournalConfig::max_live_batch_entries`]. Historical replay can also have a configured total
+/// cap through [`JournalConfig::max_live_replay_entries`].
 /// The default queue-full behavior is [`LiveQueueFullPolicy::Block`], which applies backpressure
 /// instead of silently dropping entries.
 ///
@@ -277,8 +278,8 @@ impl LiveJournal {
     /// Matching backlog covered by `options` is replayed by subsequent
     /// [`LiveJournal::poll_once`] or [`LiveJournal::run`] calls before future live entries are
     /// dispatched to that subscription.
-    /// Replay work is bounded by [`JournalConfig::max_live_batch_entries`] per engine cycle and
-    /// [`JournalConfig::max_live_replay_entries`] per subscription.
+    /// Replay work is bounded by [`JournalConfig::max_live_batch_entries`] per engine cycle.
+    /// [`JournalConfig::max_live_replay_entries`] can add an optional per-subscription total cap.
     ///
     /// This opens an isolated snapshot to establish the replay boundary. Prefer
     /// [`LiveJournal::subscribe`] when only future entries are needed.
@@ -484,14 +485,19 @@ impl LiveJournal {
         let Some(replay) = self.subscriptions[idx].replay.as_ref() else {
             return Ok(None);
         };
-        if replay.remaining == 0 {
+        if matches!(replay.remaining, Some(0)) {
+            let limit = self.config.max_live_replay_entries.unwrap_or(0);
             return Err(SdJournalError::LimitExceeded {
                 kind: LimitKind::LiveReplayEntries,
-                limit: u64::try_from(self.config.max_live_replay_entries).unwrap_or(u64::MAX),
+                limit: u64::try_from(limit).unwrap_or(u64::MAX),
             });
         }
 
-        let limit = self.config.max_live_batch_entries.min(replay.remaining);
+        let limit = replay
+            .remaining
+            .map_or(self.config.max_live_batch_entries, |remaining| {
+                self.config.max_live_batch_entries.min(remaining)
+            });
         let batch = collect_replay_batch(replay, &self.subscriptions[idx].filter, limit)?;
         let consumed = batch.entries.len();
         let batch_last_key = batch.last_key;
@@ -548,7 +554,9 @@ impl LiveJournal {
         if let Some(replay) = sub.replay.as_mut() {
             replay.cursor = None;
             replay.last_key = batch_last_key.or(replay.last_key);
-            replay.remaining = replay.remaining.saturating_sub(consumed);
+            if let Some(remaining) = replay.remaining.as_mut() {
+                *remaining = remaining.saturating_sub(consumed);
+            }
         }
         if batch_exhausted {
             sub.replay = match (catchup_journal, catchup_upper) {
@@ -952,7 +960,7 @@ fn validate_live_config(config: &JournalConfig) -> Result<()> {
             reason: "max_live_batch_entries must be greater than zero".to_string(),
         });
     }
-    if config.max_live_replay_entries == 0 {
+    if config.max_live_replay_entries == Some(0) {
         return Err(SdJournalError::InvalidQuery {
             reason: "max_live_replay_entries must be greater than zero".to_string(),
         });
@@ -1094,6 +1102,15 @@ mod tests {
 
         cfg = JournalConfig {
             max_live_batch_entries: 0,
+            ..Default::default()
+        };
+        assert!(matches!(
+            validate_live_config(&cfg),
+            Err(SdJournalError::InvalidQuery { .. })
+        ));
+
+        cfg = JournalConfig {
+            max_live_replay_entries: Some(0),
             ..Default::default()
         };
         assert!(matches!(

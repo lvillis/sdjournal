@@ -184,6 +184,54 @@ fn live_replay_is_delivered_in_bounded_batches() {
         "alpha.service",
         &synthetic_message(7, 1, "alpha.service"),
     );
+
+    assert_eq!(live.poll_once().expect("third replay batch"), 1);
+    assert_entry(
+        &recv_ready(&alpha),
+        "alpha.service",
+        &synthetic_message(7, 2, "alpha.service"),
+    );
+}
+
+#[test]
+fn live_replay_has_no_default_total_entry_cap() {
+    const ENTRIES: usize = 4097;
+
+    let units = vec!["alpha.service"; ENTRIES];
+    let layout = SyntheticJournalFile::new(&units);
+    let mut live = LiveJournal::open_dir_with_config(
+        layout.root(),
+        live_test_config_with_live_limits(1024, 1024, LiveQueueFullPolicy::Block),
+    )
+    .expect("open live engine with unbounded replay");
+
+    let mut filter = live.filter();
+    filter.match_unit("alpha.service");
+    let mut options = SubscriptionOptions::new(filter);
+    options.since_realtime(0);
+    let alpha = live
+        .subscribe_with_options(options)
+        .expect("subscribe with replay");
+
+    let mut received = 0usize;
+    while received < ENTRIES {
+        let delivered = live.poll_once().expect("replay batch");
+        assert_ne!(delivered, 0, "replay should continue until all entries");
+
+        for _ in 0..delivered {
+            let entry = recv_ready(&alpha);
+            if received == 0 || received == ENTRIES - 1 {
+                assert_entry(
+                    &entry,
+                    "alpha.service",
+                    &synthetic_message(7, received, "alpha.service"),
+                );
+            }
+            received = received.saturating_add(1);
+        }
+    }
+
+    assert_eq!(received, ENTRIES);
 }
 
 #[test]
@@ -217,7 +265,7 @@ fn replay_subscription_does_not_advance_existing_live_tail() {
 fn replay_snapshot_switches_to_live_entries_created_after_subscription() {
     let layout = SyntheticJournalFile::new(&["alpha.service", "alpha.service"]);
     let mut cfg = live_test_config_with_live_limits(4, 1, LiveQueueFullPolicy::Block);
-    cfg.max_live_replay_entries = 2;
+    cfg.max_live_replay_entries = Some(2);
     let mut live = LiveJournal::open_dir_with_config(layout.root(), cfg).expect("open live engine");
 
     let mut filter = live.filter();
@@ -295,7 +343,7 @@ fn live_only_subscription_is_not_blocked_by_another_subscription_replay() {
 fn replay_limit_counts_matching_entries_not_unrelated_entries() {
     let layout = SyntheticJournalFile::new(&["beta.service", "alpha.service"]);
     let mut cfg = live_test_config_with_live_limits(1, 1, LiveQueueFullPolicy::Block);
-    cfg.max_live_replay_entries = 1;
+    cfg.max_live_replay_entries = Some(1);
     let mut live = LiveJournal::open_dir_with_config(layout.root(), cfg).expect("open live engine");
 
     let mut filter = live.filter();
@@ -312,6 +360,38 @@ fn replay_limit_counts_matching_entries_not_unrelated_entries() {
         "alpha.service",
         &synthetic_message(7, 1, "alpha.service"),
     );
+}
+
+#[test]
+fn live_replay_configured_total_entry_cap_returns_limit_error() {
+    let layout = SyntheticJournalFile::new(&["alpha.service", "alpha.service"]);
+    let mut cfg = live_test_config_with_live_limits(1, 1, LiveQueueFullPolicy::Block);
+    cfg.max_live_replay_entries = Some(1);
+    let mut live = LiveJournal::open_dir_with_config(layout.root(), cfg).expect("open live engine");
+
+    let mut filter = live.filter();
+    filter.match_unit("alpha.service");
+    let mut options = SubscriptionOptions::new(filter);
+    options.since_realtime(0);
+    let alpha = live
+        .subscribe_with_options(options)
+        .expect("subscribe capped replay");
+
+    assert_eq!(live.poll_once().expect("first capped replay batch"), 1);
+    assert_entry(
+        &recv_ready(&alpha),
+        "alpha.service",
+        &synthetic_message(7, 0, "alpha.service"),
+    );
+
+    match live.poll_once() {
+        Err(sdjournal::SdJournalError::LimitExceeded {
+            kind: sdjournal::LimitKind::LiveReplayEntries,
+            limit,
+        }) => assert_eq!(limit, 1),
+        Ok(value) => panic!("expected replay limit error, got Ok({value})"),
+        Err(err) => panic!("expected replay limit error, got {err}"),
+    }
 }
 
 #[test]

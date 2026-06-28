@@ -126,11 +126,14 @@ pub struct JournalConfig {
     /// [`crate::LiveJournal::poll_once`] cycles when more entries remain.
     pub max_live_batch_entries: usize,
 
-    /// Maximum matching historical entries replayed for a single subscription.
+    /// Optional maximum matching historical entries replayed for a single subscription.
     ///
-    /// This bounds catch-up work when subscribing with [`crate::SubscriptionOptions::after_cursor`]
-    /// or [`crate::SubscriptionOptions::since_realtime`].
-    pub max_live_replay_entries: usize,
+    /// `None` means the replay has no total entry cap, but work is still batched by
+    /// [`JournalConfig::max_live_batch_entries`] and delivered through bounded subscription queues.
+    ///
+    /// Set this to `Some(n)` to fail with [`crate::SdJournalError::LimitExceeded`] after `n`
+    /// matching replay entries for a subscription.
+    pub max_live_replay_entries: Option<usize>,
 
     /// Behavior when a subscription queue is full.
     pub live_queue_full_policy: LiveQueueFullPolicy,
@@ -153,7 +156,7 @@ impl Default for JournalConfig {
             poll_interval: Duration::from_millis(2000),
             live_channel_capacity: 64,
             max_live_batch_entries: 64,
-            max_live_replay_entries: 4096,
+            max_live_replay_entries: None,
             live_queue_full_policy: LiveQueueFullPolicy::Block,
         }
     }
@@ -181,7 +184,7 @@ mod tests {
         assert_eq!(cfg.poll_interval, Duration::from_millis(2000));
         assert_eq!(cfg.live_channel_capacity, 64);
         assert_eq!(cfg.max_live_batch_entries, 64);
-        assert_eq!(cfg.max_live_replay_entries, 4096);
+        assert_eq!(cfg.max_live_replay_entries, None);
         assert_eq!(cfg.live_queue_full_policy, LiveQueueFullPolicy::Block);
     }
 }

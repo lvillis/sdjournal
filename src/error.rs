@@ -44,7 +44,7 @@ pub enum LimitKind {
     JournalFiles,
     /// Maximum number of query terms accepted in a single query.
     QueryTerms,
-    /// Maximum number of historical entries scanned by one live replay subscription.
+    /// Configured maximum number of historical entries replayed by one live subscription.
     LiveReplayEntries,
 }
 

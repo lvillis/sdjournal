@@ -22,7 +22,7 @@ pub(super) struct ReplayState {
     pub(super) since_realtime: Option<u64>,
     pub(super) last_key: Option<SdJournalEntryKey>,
     pub(super) upper_key: Option<SdJournalEntryKey>,
-    pub(super) remaining: usize,
+    pub(super) remaining: Option<usize>,
 }
 
 impl ReplayState {

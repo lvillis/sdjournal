@@ -97,7 +97,7 @@ mod util;
 pub use crate::config::{JournalConfig, LiveQueueFullPolicy, MmapPolicy};
 pub use crate::cursor::Cursor;
 pub use crate::entry::{EntryOwned, EntryRef, LiveEntry};
-pub use crate::error::{Result, SdJournalError};
+pub use crate::error::{CompressionAlgo, LimitKind, Result, SdJournalError};
 pub use crate::journal::Journal;
 #[cfg(feature = "tokio")]
 pub use crate::live::TokioSubscription;
