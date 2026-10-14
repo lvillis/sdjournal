@@ -36,7 +36,7 @@ siphasher = { version = "1.0.2", default-features = false, features = ["std"] }
 
 # Optional compression backends for journal DATA payloads.
 lz4_flex = { version = "0.13.0", default-features = false, features = ["std", "safe-decode", "checked-decode"], optional = true }
-ruzstd = { version = "0.8.2", default-features = false, features = ["std", "hash"], optional = true }
+ruzstd = { version = "0.9.1", default-features = false, features = ["std", "hash"], optional = true }
 xz4rust = { version = "0.2.1", default-features = false, features = ["std", "bcj", "crc64", "delta", "sha256", "no_unsafe"], optional = true }
 
 # Optional runtime integrations.
